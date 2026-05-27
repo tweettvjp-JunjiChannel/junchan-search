@@ -1,0 +1,21 @@
+# Streamlit secrets（本番パスワードが入っているため絶対にコミットしない）
+.streamlit/secrets.toml
+
+# SQLite データベース
+# ※ notes.db は「ローカルで更新 → git commit → Streamlit Cloud に反映」する運用のため
+#   コミット対象にする。不要な一時 DB だけ除外したい場合は個別に指定すること。
+# *.db  ← あえてコメントアウト
+
+# Python キャッシュ
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 仮想環境
+.venv/
+venv/
+env/
+
+# OS 生成ファイル
+.DS_Store
+Thumbs.db
