@@ -7,6 +7,8 @@ from bs4 import BeautifulSoup
 from dataclasses import dataclass, field
 from collections import Counter
 import hmac
+import os
+import streamlit.components.v1 as components
 
 DB_PATH = "notes.db"
 
@@ -122,18 +124,42 @@ def delete_all_notes():
     conn.close()
 
 
+def update_note_title(url: str, new_title: str) -> None:
+    """タイトル（先頭部分）のみを更新する。URL・日付・価格は変更しない。"""
+    url = normalize_url(url)
+    new_title = new_title.strip()
+    if not new_title:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE notes SET title=?, updated_at=CURRENT_TIMESTAMP WHERE url=?",
+        (new_title, url),
+    )
+    conn.commit()
+    conn.close()
+
+
 def search_notes(query: str, sort_asc: bool = False) -> list[tuple[str, str, str, str]]:
+    """
+    キーワード検索（AND 条件）。スペース区切りで複数キーワードを指定可能。
+    例: 'AI 生成' → タイトルに「AI」と「生成」の両方を含む記事のみ返す。
+    """
+    keywords = _split_keywords(query)
+    if not keywords:
+        return []
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    conditions = " AND ".join("title LIKE ?" for _ in keywords)
+    params = [f"%{kw}%" for kw in keywords]
     cur.execute(
-        "SELECT url, title, created_at_str, price FROM notes WHERE title LIKE ?",
-        (f"%{query}%",),
+        f"SELECT url, title, created_at_str, price FROM notes WHERE {conditions}",
+        params,
     )
     rows = cur.fetchall()
     conn.close()
     rows.sort(
         key=lambda r: _parse_date_for_sort(r[2] or ""),
-        reverse=not sort_asc,   # True = 新しい順（降順）
+        reverse=not sort_asc,
     )
     return rows
 
@@ -226,21 +252,31 @@ def _parse_date_for_sort(date_str: str) -> str:
     return "0000-00-00 00:00"
 
 
+def _split_keywords(query: str) -> list[str]:
+    """
+    全角・半角スペースでクエリを分割してキーワードリストを返す。
+    例: 'AI 生成' / 'AI　生成' → ['AI', '生成']
+    """
+    return [kw for kw in query.replace('　', ' ').split() if kw]
+
+
 def _highlight(text: str, query: str) -> str:
     """
-    text 内の query キーワードを <mark> タグで囲む（大文字小文字無視）。
+    text 内のキーワードを <mark> タグで囲む（複数キーワード・大文字小文字無視）。
     XSS を防ぐため、テキストと query の両方を HTML エスケープしてから処理する。
     """
     if not query or not text:
         return html_lib.escape(text)
-    escaped_text  = html_lib.escape(text)
-    escaped_query = re.escape(html_lib.escape(query))
-    return re.sub(
-        f"({escaped_query})",
-        r"<mark>\1</mark>",
-        escaped_text,
-        flags=re.IGNORECASE,
-    )
+    escaped_text = html_lib.escape(text)
+    for kw in _split_keywords(query):
+        escaped_kw = re.escape(html_lib.escape(kw))
+        escaped_text = re.sub(
+            f"({escaped_kw})",
+            r"<mark>\1</mark>",
+            escaped_text,
+            flags=re.IGNORECASE,
+        )
+    return escaped_text
 
 
 def _clean_aria_label(aria: str) -> str:
@@ -745,7 +781,7 @@ def _decode_uploaded_file(uploaded_file) -> str | None:
     st.file_uploader の戻り値をテキストにデコードする。
     UTF-8(BOM付き含む) → Shift-JIS → EUC-JP → latin-1 の順で試みる。
     """
-    raw_bytes = uploaded_file.read()
+    raw_bytes = uploaded_file.getvalue()
     for enc in ("utf-8-sig", "utf-8", "shift_jis", "euc-jp", "latin-1"):
         try:
             return raw_bytes.decode(enc)
@@ -806,22 +842,67 @@ def _run_extraction_ui(raw_html: str) -> None:
             )
 
 
+def _run_first_extraction_ui(raw_html: str) -> None:
+    """HTML から先頭 1 件だけを抽出・保存する（先頭追加ボタン用）。"""
+    with st.spinner("解析中..."):
+        extracted, report = extract_from_html(raw_html)
+
+    if not extracted:
+        st.warning(
+            "note.com の記事が見つかりませんでした。\n\n"
+            "- ブラウザで `https://note.com/{ユーザー名}/all` を開き、"
+            "**Ctrl+U** でソースをコピーしていますか？\n"
+            "- JavaScript 実行後の DOM ではなく、**生のHTMLソース**をコピーしていますか？"
+        )
+        return
+
+    # 先頭 1 件のみ処理
+    url, item = extracted[0]
+    r = upsert_note(url, item)
+    label = {"added": "新規追加", "updated": "更新", "skipped": "スキップ（重複）"}.get(r, r)
+    st.success(f"✅ 先頭 1 件を **{label}** しました")
+
+    # 登録した 1 件をプレビュー
+    _render_note_row(url, item.title, item.date_str, item.price_str, show_delete=False)
+
+    if len(extracted) > 1:
+        st.caption(
+            f"💡 HTML 内には他に **{len(extracted) - 1}** 件が見つかりました。"
+            "「まとめ追加」ボタンで全件を一括登録できます。"
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 管理者認証ユーティリティ
+# 実行環境判定（ローカル自動管理者 / クラウド閲覧専用）
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _verify_password(password: str) -> bool:
-    """st.secrets の ADMIN_PASSWORD と定数時間比較（タイミング攻撃対策）"""
+def _is_local_environment() -> bool:
+    """
+    ローカルPC 実行かどうかを判定する。
+
+    判定ロジック（優先順位順）:
+    ① secrets.toml に IS_CLOUD = true → クラウドと強制判定（安全スイッチ）
+    ② Streamlit Community Cloud の特徴: HOME=/home/appuser → クラウド
+    ③ それ以外（Windows / macOS / 未設定）→ ローカルPC と判定 → 管理者モード
+    """
+    # ① secrets に IS_CLOUD フラグがあれば最優先
     try:
-        correct = st.secrets["ADMIN_PASSWORD"]
-    except (KeyError, FileNotFoundError):
+        if st.secrets.get("IS_CLOUD", False):
+            return False
+    except Exception:
+        pass  # secrets.toml がない場合も続行
+
+    # ② Streamlit Community Cloud は HOME=/home/appuser で動作する
+    if os.environ.get("HOME", "") == "/home/appuser":
         return False
-    return hmac.compare_digest(correct.encode("utf-8"), password.encode("utf-8"))
+
+    # ③ それ以外はすべてローカル PC
+    return True
 
 
 def _is_admin() -> bool:
-    """現在のセッションが管理者としてログイン済みか返す"""
-    return bool(st.session_state.get("is_admin", False))
+    """管理者（= ローカル実行）かどうかを返す。パスワード不要。"""
+    return _is_local_environment()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -830,8 +911,8 @@ def _is_admin() -> bool:
 
 init_db()
 
-st.set_page_config(page_title="note インデックス検索", page_icon="📝", layout="wide")
-st.title("📝 note インデックス検索システム")
+st.set_page_config(page_title="順ちゃんnote検索システム", page_icon="📝", layout="wide")
+st.title("📝 順ちゃんnote検索システム")
 
 st.markdown(
     """
@@ -864,22 +945,49 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── サイドバー：管理者ログイン ────────────────────────────────────────────────
+# ── ブラウザ自動翻訳を完全禁止 ────────────────────────────────────────────────
+# st.markdown の <script> は React の dangerouslySetInnerHTML では実行されないため、
+# components.html（同一オリジン iframe）経由で window.parent にアクセスし
+# <html translate="no" class="notranslate"> を設定する。
+components.html(
+    """
+    <script>
+    (function () {
+        try {
+            var doc = window.parent.document;
+            var html = doc.documentElement;
+
+            // ① <html translate="no"> — Chrome/Edge の自動翻訳トリガーを無効化
+            html.setAttribute("translate", "no");
+
+            // ② class="notranslate" — Google翻訳ウィジェット向けの除外クラス
+            html.classList.add("notranslate");
+
+            // ③ <meta name="google" content="notranslate"> — ページ翻訳オファーを抑止
+            if (!doc.querySelector('meta[name="google"][content="notranslate"]')) {
+                var m = doc.createElement("meta");
+                m.setAttribute("name", "google");
+                m.setAttribute("content", "notranslate");
+                doc.head.appendChild(m);
+            }
+        } catch (e) {
+            // クロスオリジン制限等で失敗しても無視
+        }
+    })();
+    </script>
+    """,
+    height=0,
+    scrolling=False,
+)
+
+# ── サイドバー：実行環境ステータス ───────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 🔐 管理者ログイン")
-    if st.session_state.get("is_admin"):
-        st.success("✅ 管理者としてログイン中")
-        if st.button("ログアウト", key="admin_logout"):
-            st.session_state["is_admin"] = False
-            st.rerun()
+    if _is_local_environment():
+        st.success("🖥️ ローカル環境（管理者モード）")
+        st.caption("データ追加・変更・削除が利用できます。")
     else:
-        _pw_input = st.text_input("パスワード", type="password", key="admin_pw_input")
-        if st.button("ログイン", key="admin_login_btn"):
-            if _verify_password(_pw_input):
-                st.session_state["is_admin"] = True
-                st.rerun()
-            else:
-                st.error("パスワードが違います")
+        st.info("🌐 Web 公開モード（閲覧専用）")
+        st.caption("検索機能のみ利用できます。")
 
 # タブ表示：管理者のみ「データ追加」「管理」タブを表示
 if _is_admin():
@@ -893,7 +1001,43 @@ def _render_note_row(
     url: str, title: str, date_str: str, price_str: str,
     show_delete: bool = True, highlight_query: str = "",
 ):
-    """1件のノートカードを描画する（ハイライト・削除ボタン付き）"""
+    """1件のノートカードを描画する（ハイライト・変更・削除ボタン付き）"""
+    url_hash = abs(hash(url)) % 10**12
+    is_editing = st.session_state.get("editing_url") == url
+
+    if is_editing:
+        # ── 編集モード：タイトル（先頭部分）だけを書き換えて保存 ──
+        st.markdown(
+            f'<div class="note-card" style="border-left-color:#e8a000;">'
+            f'<span style="font-size:0.8rem;color:#888;">編集中: '
+            f'<a href="{url}" target="_blank" rel="noopener">{html_lib.escape(url)}</a>'
+            f'</span></div>',
+            unsafe_allow_html=True,
+        )
+        new_title = st.text_input(
+            "タイトルを変更（先頭部分のみ更新・URLや日付は変わりません）",
+            value=title,
+            key=f"edit_input_{url_hash}",
+        )
+        col_save, col_cancel = st.columns([2, 2])
+        with col_save:
+            if st.button(
+                "💾 保存する", key=f"save_{url_hash}",
+                type="primary", use_container_width=True,
+            ):
+                update_note_title(url, new_title)
+                st.session_state.pop("editing_url", None)
+                st.rerun()
+        with col_cancel:
+            if st.button(
+                "✕ キャンセル", key=f"cancel_{url_hash}",
+                use_container_width=True,
+            ):
+                st.session_state.pop("editing_url", None)
+                st.rerun()
+        return  # 編集フォームを表示したら以降の通常描画はスキップ
+
+    # ── 通常表示モード ──
     meta_parts = []
     if date_str:
         meta_parts.append(f"📅 作成日: {date_str}")
@@ -901,10 +1045,9 @@ def _render_note_row(
         meta_parts.append(f"💰 価格: {price_str}")
     meta_html = " &nbsp;|&nbsp; ".join(meta_parts)
 
-    # タイトルにキーワードハイライトを適用（検索時のみ）
     display_title = _highlight(title, highlight_query)
 
-    col_card, col_del = st.columns([11, 1])
+    col_card, col_edit, col_del = st.columns([10, 1, 1])
     with col_card:
         st.markdown(
             f'<div class="note-card">'
@@ -914,10 +1057,14 @@ def _render_note_row(
             + "</div>",
             unsafe_allow_html=True,
         )
+    with col_edit:
+        if show_delete:
+            if st.button("✏️", key=f"edit_{url_hash}", help="タイトルを変更する"):
+                st.session_state["editing_url"] = url
+                st.rerun()
     with col_del:
         if show_delete:
-            btn_key = f"del_{abs(hash(url)) % 10**12}"
-            if st.button("🗑️", key=btn_key, help="この記事を削除"):
+            if st.button("🗑️", key=f"del_{url_hash}", help="この記事を削除"):
                 delete_note(url)
                 st.rerun()
 
@@ -945,13 +1092,20 @@ with tab_search:
         )
     sort_asc = (sort_label == "📅 古い順")
 
+    _show_controls = _is_admin()   # ローカル = True、Web = False
+
     if query.strip():
         rows = search_notes(query.strip(), sort_asc=sort_asc)
-        st.write(f"**{len(rows):,} 件**ヒット")
+        kw_count = len(_split_keywords(query.strip()))
+        hit_label = f"**{len(rows):,} 件**ヒット"
+        if kw_count >= 2:
+            hit_label += f"（{kw_count} キーワード AND 検索）"
+        st.write(hit_label)
         if rows:
             for url, title, date_str, price_str in rows:
                 _render_note_row(
                     url, title, date_str or "", price_str or "",
+                    show_delete=_show_controls,
                     highlight_query=query.strip(),
                 )
         else:
@@ -965,7 +1119,10 @@ with tab_search:
         else:
             with st.expander(f"全件表示（最新 500 件）", expanded=False):
                 for url, title, date_str, price_str in get_all_notes(sort_asc=sort_asc):
-                    _render_note_row(url, title, date_str or "", price_str or "")
+                    _render_note_row(
+                        url, title, date_str or "", price_str or "",
+                        show_delete=_show_controls,
+                    )
 
 
 # ── タブ②：データ追加 ─────────────────────────────────────────────────────────
@@ -973,12 +1130,18 @@ if tab_add is not None:
     with tab_add:
         st.subheader("HTMLから記事を一括登録")
 
+        st.info(
+            "📋 **操作手順（Exciteブログ経由）**\n\n"
+            "note 編集の記事一覧を Excite ブログの「記事を書く」編集モードを利用し、"
+            "そこにペーストし、その後 HTML モードにして、その部分を全てコピーする。"
+        )
+
         # ════════════════════════════════════════════════════════════
         # 方法①: ファイルアップロード（10万文字以上の巨大ファイルに対応）
         # ════════════════════════════════════════════════════════════
         st.markdown("##### 📂 方法①: HTML / TXT ファイルをアップロード")
         st.caption(
-            "エキサイトブログのHTML編集モードで作成した `.html` / `.txt` ファイルや、"
+            "上記手順で作成した `.html` / `.txt` ファイルや、"
             "note.com のページソースをファイル保存したものをドラッグ＆ドロップしてください。"
             "10万文字以上の巨大ファイルにも対応しています。"
         )
@@ -997,14 +1160,28 @@ if tab_add is not None:
                 f"（{file_size_kb:,.1f} KB / "
                 f"{len(uploaded_file.getvalue()):,} bytes）を読み込み済み"
             )
-            if st.button(
-                "ファイルから抽出して登録する",
-                type="primary",
-                key="btn_process_file",
-            ):
-                raw_html = _decode_uploaded_file(uploaded_file)
-                if raw_html:
-                    _run_extraction_ui(raw_html)
+            col_f_all, col_f_first = st.columns(2)
+            with col_f_all:
+                if st.button(
+                    "📥 まとめ追加（全件）",
+                    type="primary",
+                    key="btn_process_file",
+                    use_container_width=True,
+                    help="抽出された全記事をまとめてDBに登録します",
+                ):
+                    raw_html = _decode_uploaded_file(uploaded_file)
+                    if raw_html:
+                        _run_extraction_ui(raw_html)
+            with col_f_first:
+                if st.button(
+                    "1️⃣ 先頭追加（1件のみ）",
+                    key="btn_process_file_first",
+                    use_container_width=True,
+                    help="抽出リストの先頭1件だけをDBに登録します",
+                ):
+                    raw_html = _decode_uploaded_file(uploaded_file)
+                    if raw_html:
+                        _run_first_extraction_ui(raw_html)
 
         st.divider()
 
@@ -1013,25 +1190,48 @@ if tab_add is not None:
         # ════════════════════════════════════════════════════════════
         st.markdown("##### 📋 方法②: HTMLソースを直接貼り付け")
         st.caption(
-            "`https://note.com/{ユーザー名}/all` を **Ctrl+U** で開いた生のHTMLソース、"
-            "またはエキサイトブログ記事本文のHTMLをそのまま貼り付けてください。"
+            "上記手順でコピーした HTML テキストをそのまま貼り付けてください。"
         )
 
         html_input = st.text_area(
             "HTMLソースをここに丸ごと貼り付け",
             height=260,
             placeholder=(
-                '<script id="__NEXT_DATA__" ...> を含む note.com の生 HTML\n'
-                "または エキサイトブログの記事本文 HTML をそのまま貼り付けてください"
+                "Exciteブログ HTML モードでコピーしたテキスト\n"
+                'または <script id="__NEXT_DATA__" ...> を含む note.com の生 HTML をそのまま貼り付けてください'
             ),
             key="html_paste_input",
         )
 
-        if st.button("貼り付けから抽出して登録する", type="primary", key="btn_process_paste"):
-            if not html_input.strip():
-                st.error("HTMLを入力してください。")
-            else:
-                _run_extraction_ui(html_input)
+        st.caption(
+            "⚠️ **先頭追加（1件追加）を使う場合**: "
+            "note 編集の記事一覧を **2項目以上** コピペすること。"
+        )
+
+        col_p_all, col_p_first = st.columns(2)
+        with col_p_all:
+            if st.button(
+                "📥 まとめ追加（全件）",
+                type="primary",
+                key="btn_process_paste",
+                use_container_width=True,
+                help="抽出された全記事をまとめてDBに登録します",
+            ):
+                if not html_input.strip():
+                    st.error("HTMLを入力してください。")
+                else:
+                    _run_extraction_ui(html_input)
+        with col_p_first:
+            if st.button(
+                "1️⃣ 先頭追加（1件のみ）",
+                key="btn_process_paste_first",
+                use_container_width=True,
+                help="抽出リストの先頭1件だけをDBに登録します",
+            ):
+                if not html_input.strip():
+                    st.error("HTMLを入力してください。")
+                else:
+                    _run_first_extraction_ui(html_input)
 
 
 # ── タブ③：管理 ───────────────────────────────────────────────────────────────
