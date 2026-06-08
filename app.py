@@ -557,8 +557,9 @@ def _strategy_li_blocks(raw_html: str, results: dict, report: ExtractionReport) 
         3. class="visually-hidden" の <span> テキスト
         4. <h1>〜<h4> / <p> の中で最も長いテキスト
 
-    ● 日付: <time datetime="..."> 属性 → なければテキスト → format_note_date で整形
-    ● 価格: 「¥」を含む <span> → なければ「無料」
+    ● 日付: <time> タグのテキストをそのまま使用（例: "2026年6月1日 17:05"）
+             クラス名・datetime 属性の形式に依存しない
+    ● 価格: ¥ で始まるテキストノードを全タグから検索（タグ種類に依存しない）
     """
     soup = BeautifulSoup(raw_html, "html.parser")
 
@@ -680,26 +681,23 @@ def _strategy_li_blocks(raw_html: str, results: dict, report: ExtractionReport) 
             continue
 
         # ── 日付取得 ─────────────────────────────────────────────────────────
-        date_str = ""
+        # <time> タグのテキストをそのまま使用（例: "2026年6月1日 17:05"）
+        # ・クラス名・datetime 属性の形式に依存しない
+        # ・separator=" " で子要素間にスペースを補い、日時が繋がらないようにする
         time_tag = li.find("time")
-        if time_tag:
-            dt_attr = time_tag.get("datetime", "")
-            if dt_attr:
-                # datetime="2026-05-26T23:59:00+09:00" など ISO 形式
-                date_str = format_note_date(dt_attr)
-            if not date_str:
-                # テキスト "2026年5月26日 23:59" をそのまま使う
-                date_str = time_tag.get_text(strip=True)
+        date_str = time_tag.get_text(" ", strip=True) if time_tag else ""
 
         # ── 価格取得 ─────────────────────────────────────────────────────────
-        price_str = ""
-        for span in li.find_all("span"):
-            t = span.get_text(strip=True)
-            if "¥" in t:
-                price_str = t
-                break
-        if not price_str:
-            price_str = "無料"
+        # ¥（半角 U+00A5）・￥（全角 U+FFE5）の両方に対応し、
+        # 直後に数字が続くテキストノードのみを価格と判定する（誤検知防止）
+        price_str = next(
+            (
+                s.strip()
+                for s in li.strings
+                if re.match(r'^[¥￥]\d', s.strip())
+            ),
+            "無料",
+        )
 
         # ── 登録 ─────────────────────────────────────────────────────────────
         url = normalize_url(url)
