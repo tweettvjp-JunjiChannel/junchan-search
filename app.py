@@ -187,6 +187,22 @@ def count_notes() -> int:
     return cur.fetchone()[0]
 
 
+def count_notes_missing_meta() -> tuple[int, int]:
+    """日付・価格が未取得の件数を返す (date_missing, price_missing)"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM notes WHERE created_at_str IS NULL OR created_at_str = ''"
+    )
+    date_missing = cur.fetchone()[0]
+    cur.execute(
+        "SELECT COUNT(*) FROM notes WHERE price IS NULL OR price = ''"
+    )
+    price_missing = cur.fetchone()[0]
+    conn.close()
+    return date_missing, price_missing
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ユーティリティ
 # ─────────────────────────────────────────────────────────────────────────────
@@ -563,13 +579,51 @@ def _strategy_li_blocks(raw_html: str, results: dict, report: ExtractionReport) 
     """
     soup = BeautifulSoup(raw_html, "html.parser")
 
-    # ── <li> ブロックを探す ──────────────────────────────────────────────────
+    # ── <li> ブロックを探す（4段階・ビルド変化対応）────────────────────────
+    #
+    # ❌NG: data-v-765c3831 はVue.jsビルドハッシュ。note.com更新のたびに変わる。
+    #       固定値でマッチさせるとビルドが変わった瞬間に全件0件になる。
+    #
+    # 検出戦略①: data-v-765c3831（後方互換・旧ハッシュ）
     li_items = soup.find_all("li", attrs={"data-v-765c3831": True})
+    used_strategy = "data-v-765c3831"
+
+    # 検出戦略②: data-v-* 任意ハッシュ（Vue.js スコープ属性ならどのハッシュでも可）
     if not li_items:
-        li_items = soup.find_all("li", class_="o-articleList__item")
+        li_items = [
+            li for li in soup.find_all("li")
+            if any(k.startswith("data-v-") for k in li.attrs)
+        ]
+        used_strategy = "data-v-* (ワイルドカード)"
+
+    # 検出戦略③: class に "o-articleList" を含む（BEM命名規則の部分一致）
     if not li_items:
-        report.logs.append("Strategy E: <li> ブロックが見つかりませんでした")
+        li_items = [
+            li for li in soup.find_all("li")
+            if any("o-articleList" in c for c in (li.get("class") or []))
+        ]
+        used_strategy = "class:o-articleList*"
+
+    # 検出戦略④: listCheckbox_* id を持つ要素の親 <li>（最も安定したシグナル）
+    if not li_items:
+        seen_ids: set[int] = set()
+        li_items = []
+        for inp in soup.find_all(id=re.compile(r"^listCheckbox_")):
+            parent_li = inp.find_parent("li")
+            if parent_li and id(parent_li) not in seen_ids:
+                li_items.append(parent_li)
+                seen_ids.add(id(parent_li))
+        used_strategy = "listCheckbox_* 親<li>"
+
+    if not li_items:
+        report.logs.append(
+            "Strategy E: <li> ブロックが見つかりませんでした（全4戦略失敗）"
+        )
         return 0
+
+    report.logs.append(
+        f"Strategy E: <li> {len(li_items)} 件を検出（検出方法: {used_strategy}）"
+    )
 
     # ── page_owner を <a href> から動的に取得 ───────────────────────────────
     page_owner = report.page_owner
@@ -681,11 +735,18 @@ def _strategy_li_blocks(raw_html: str, results: dict, report: ExtractionReport) 
             continue
 
         # ── 日付取得 ─────────────────────────────────────────────────────────
-        # <time> タグのテキストをそのまま使用（例: "2026年6月1日 17:05"）
-        # ・クラス名・datetime 属性の形式に依存しない
-        # ・separator=" " で子要素間にスペースを補い、日時が繋がらないようにする
+        # 優先①: <time> タグのテキスト（クラス名・datetime 属性に依存しない）
         time_tag = li.find("time")
-        date_str = time_tag.get_text(" ", strip=True) if time_tag else ""
+        if time_tag:
+            date_str = time_tag.get_text(" ", strip=True)
+        else:
+            # 優先②: <time> がない場合 → 「YYYY年M月D日」パターンを全テキストから探す
+            date_str = ""
+            for s in li.strings:
+                t = s.strip()
+                if re.search(r'\d{4}年\d{1,2}月\d{1,2}日', t):
+                    date_str = t
+                    break
 
         # ── 価格取得 ─────────────────────────────────────────────────────────
         # ¥（半角 U+00A5）・￥（全角 U+FFE5）の両方に対応し、
@@ -1241,7 +1302,42 @@ if tab_manage is not None:
         if st.session_state.get("manage_msg"):
             st.success(st.session_state.pop("manage_msg"))
 
-        st.metric("現在の登録件数", f"{count_notes():,} 件")
+        total = count_notes()
+        date_miss, price_miss = count_notes_missing_meta()
+
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("登録件数", f"{total:,} 件")
+        col_m2.metric(
+            "日付 未取得",
+            f"{date_miss:,} 件",
+            delta=None if date_miss == 0 else f"要修復",
+            delta_color="inverse",
+        )
+        col_m3.metric(
+            "価格 未取得",
+            f"{price_miss:,} 件",
+            delta=None if price_miss == 0 else f"要修復",
+            delta_color="inverse",
+        )
+
+        # ── DB修復ガイド ─────────────────────────────────────────────────────
+        if date_miss > 0 or price_miss > 0:
+            st.divider()
+            st.markdown("#### 🔧 日付・価格の一括修復")
+            st.info(
+                f"**{date_miss:,} 件**の日付 / **{price_miss:,} 件**の価格が未取得です。\n\n"
+                "note 管理画面（https://note.com/{ユーザー名}/all）を開き、"
+                "記事一覧をすべて選択して HTML をコピーし、"
+                "「➕ データ追加」タブの **まとめ追加** で貼り付けてください。\n\n"
+                "既登録の記事は **日付・価格だけが上書き更新** されます（削除はされません）。"
+            )
+            st.markdown(
+                "**📋 修復手順**\n"
+                "1. note 管理画面 → 記事一覧 → 全ページをスクロールして表示\n"
+                "2. ブラウザの「ページのソースを表示」または Exciteブログ経由でHTMLをコピー\n"
+                "3. 「➕ データ追加」タブ → テキストエリアに貼り付け → **まとめ追加** をクリック\n"
+                "4. 「更新 XX 件」と表示されれば修復完了"
+            )
 
         st.divider()
         st.markdown("#### ⚠️ 全データ削除（初期化）")
