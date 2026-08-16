@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: junchan-world
  */
 
@@ -43,10 +43,49 @@ class Custom_Search_Category_Filter {
     public function __construct() {
         add_action('pre_get_posts', array($this, 'filter_search_query'));
         add_action('pre_get_posts', array($this, 'filter_front_page_query'));
+        add_action('template_redirect', array($this, 'redirect_legacy_category_archive'));
         add_filter('posts_join', array($this, 'join_full_title_meta'), 10, 2);
         add_filter('posts_search', array($this, 'extend_search_to_full_title'), 10, 2);
         add_filter('posts_distinct', array($this, 'force_distinct_on_search'), 10, 2);
         add_filter('posts_orderby', array($this, 'prioritize_title_matches'), 10, 2);
+    }
+
+    /**
+     * 【2026-08-16 追記：SEO・UX対応】Google検索結果等から、トップページでは
+     * 既にnote・exblog以外を除外している古いカテゴリー（「ニュース」や
+     * 「TweetTV」関連カテゴリー等）のアーカイブページ（/category/xxx/）へ
+     * 直接アクセスしてくる訪問者がいる。トップページはfilter_front_page_query()
+     * で絞り込み済みだが、カテゴリーアーカイブページ自体は素通しだったため、
+     * そこを直接叩かれると古い記事群がそのまま見えてしまっていた。
+     * 「表示を許可するカテゴリー（note・exblog）」をDEFAULT_CHECKED（＝
+     * filter_front_page_queryと同じ単一の情報源）から動的に導出し、それ以外の
+     * カテゴリーアーカイブへのアクセスは全てトップページへ301リダイレクトする。
+     * 新しいカテゴリーが増えてもここを個別に追記する必要がないよう、
+     * 「除外リストの列挙」ではなく「許可リストにあるかどうか」で判定する設計。
+     */
+    public function redirect_legacy_category_archive() {
+        if (is_admin() || !is_category() || !is_main_query()) {
+            return;
+        }
+
+        $queried = get_queried_object();
+        if (!($queried instanceof WP_Term)) {
+            return;
+        }
+
+        $visible_cat_ids = array();
+        foreach (self::DEFAULT_CHECKED as $key) {
+            if (isset(self::CAT_MAP[$key])) {
+                $visible_cat_ids[] = self::CAT_MAP[$key];
+            }
+        }
+
+        if (in_array((int) $queried->term_id, $visible_cat_ids, true)) {
+            return;
+        }
+
+        wp_safe_redirect(home_url('/'), 301);
+        exit;
     }
 
     /**
