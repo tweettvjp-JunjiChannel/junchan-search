@@ -17,9 +17,19 @@ title_looks_like_news()（save_postフック側）と完全に同じ正規表現
 デフォルトはドライラン（何も変更しない。対象一覧の表示のみ）。
 実際にWordPressへ反映するには --execute を指定する。
 
+【チェックポイント設計（順ちゃんAI自律運用ルール準拠）】
+--execute実行時、1件反映するたびに news_backfill_progress.json へその記事IDを
+即座に追記保存する（バッチ末尾でまとめて書くのではなく、1件ごとに書き切る）。
+途中で通信断・junchan_agent.pyによる緊急停止・強制終了等が発生しても、
+再実行時は既に成功記録がある記事をスキップして未処理分だけを再開できる。
+なお対象抽出自体もWordPress側の実カテゴリー付与状況（NEWS_CATEGORY_IDが
+categoriesに含まれるか）を都度確認しているため、この進捗ファイルが無い/古い
+状態で再実行しても二重付与が起きることはない（進捗ファイルは主に「どこまで
+処理したか」を高速に把握するための補助的な記録であり、正はWordPress側）。
+
 実行方法:
     python backfill_news_category.py                       # ドライラン
-    python backfill_news_category.py --execute              # 本番実行
+    python backfill_news_category.py --execute              # 本番実行（中断時は再実行で再開）
     python backfill_news_category.py --execute --limit 5    # 試験実行（先頭5件のみ）
 """
 
@@ -51,7 +61,21 @@ NEWS_TITLE_PATTERN = re.compile(
 SCRIPT_DIR = Path(__file__).resolve().parent
 CREDENTIALS_PATH = SCRIPT_DIR / "wp_credentials.json"
 LOG_PATH = SCRIPT_DIR / "backfill_news_category_log.csv"
+PROGRESS_PATH = SCRIPT_DIR / "news_backfill_progress.json"
 REQUEST_DELAY_SECONDS = 0.5
+
+
+def load_progress() -> dict:
+    if not PROGRESS_PATH.exists():
+        return {}
+    try:
+        return json.loads(PROGRESS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_progress(progress: dict) -> None:
+    PROGRESS_PATH.write_text(json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_credentials() -> dict:
@@ -144,20 +168,30 @@ def main() -> None:
     mode = "本番実行（--execute）" if args.execute else "ドライラン（変更なし）"
     print(f"実行モード: {mode}")
 
+    progress = load_progress()
+    if progress:
+        print(f"進捗ファイルを検出: {PROGRESS_PATH}（記録済み{len(progress)}件はスキップ判定に使用）")
+
     print("全投稿を走査中...")
     posts = wp.list_all_posts()
     print(f"全投稿: {len(posts)}件")
 
     targets = []
+    skipped_by_progress = 0
     for p in posts:
         title = effective_title(p)
         if not NEWS_TITLE_PATTERN.search(title):
             continue
+        if progress.get(str(p["id"]), {}).get("status") == "success":
+            skipped_by_progress += 1
+            continue  # 進捗ファイルで処理済みと記録済み（中断からの再開時に高速スキップ）
         categories = p.get("categories") or []
         if NEWS_CATEGORY_ID in categories:
-            continue  # 既に付与済み
+            continue  # WordPress側では既に付与済み（進捗ファイルが無い/古い場合の正の情報源）
         targets.append((p, title))
 
+    if skipped_by_progress:
+        print(f"進捗ファイルにより{skipped_by_progress}件をスキップしました（既に処理済み）。")
     print(f"ニュースカテゴリー付与対象: {len(targets)}件")
 
     if args.limit:
@@ -192,6 +226,12 @@ def main() -> None:
             wp.update_categories(p["id"], after)
             fixed_count += 1
             print("    [OK] 付与しました")
+            progress[str(p["id"])] = {
+                "slug": p["slug"],
+                "status": "success",
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }
+            save_progress(progress)  # 1件ごとに即座に永続化する（バッチ末尾でまとめて書かない）
             log_rows.append(
                 {
                     "timestamp": datetime.now().isoformat(timespec="seconds"),
