@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.3.0
+ * Version: 1.4.0
  * Author: junchan-world
  */
 
@@ -37,6 +37,11 @@ class Custom_Search_Category_Filter {
     // チェックボックスが一切送信されなかった場合（フォーム未経由の直接URLアクセス等）のデフォルト
     const DEFAULT_CHECKED = array('note', 'exblog');
 
+    // 「ニュース」カテゴリー（2026-08-16に復活）。トップページのデフォルト
+    // 絞り込み（DEFAULT_CHECKED）には含めないが、アーカイブページ単体は
+    // 生きたページとして許可するため、リダイレクト判定でのみ個別に許可する。
+    const NEWS_CATEGORY_ID = 2448;
+
     const FULL_TITLE_META_KEY = 'note_full_title';
     const FULL_TITLE_JOIN_ALIAS = 'note_full_title_meta';
 
@@ -48,20 +53,114 @@ class Custom_Search_Category_Filter {
         add_filter('posts_search', array($this, 'extend_search_to_full_title'), 10, 2);
         add_filter('posts_distinct', array($this, 'force_distinct_on_search'), 10, 2);
         add_filter('posts_orderby', array($this, 'prioritize_title_matches'), 10, 2);
+
+        // 【2026-08-16 追記：「ニュース」カテゴリー復活・自動分類】
+        // save_postはREST経由の新規作成時、note_full_titleメタが未反映の
+        // 段階（wp_insert_post直後）で発火してしまうため、post_title単体の
+        // 判定用フォールバックとして残しつつ、メタの実書き込みタイミングを
+        // 正確に捉えられる added/updated_post_meta（note_full_titleキーのみ）
+        // もあわせてフックし、どちらの経路でも取りこぼさないようにする。
+        add_action('save_post', array($this, 'handle_save_post'), 20, 3);
+        add_action('added_post_meta', array($this, 'handle_note_full_title_meta_change'), 10, 4);
+        add_action('updated_post_meta', array($this, 'handle_note_full_title_meta_change'), 10, 4);
+    }
+
+    /**
+     * タイトル末尾が「…8/12」「...８／１２」のように、省略記号（"…"または"..."）
+     * に続けて「月/日」形式の日付で終わっているかを判定する。全角/半角の
+     * 数字・スラッシュ・空白混在に対応する。backfill_news_category.py の
+     * NEWS_TITLE_PATTERN と完全に同じロジック（変更する場合は両方を直すこと）。
+     */
+    public static function title_looks_like_news($title) {
+        $title = trim((string) $title);
+        if ($title === '') {
+            return false;
+        }
+        return (bool) preg_match('/(?:\.\.\.|…)\s*[0-90-9]{1,2}\s*[\/／]\s*[0-90-9]{1,2}\s*$/u', $title);
+    }
+
+    /**
+     * 対象記事に「ニュース」カテゴリーを追加する（既存カテゴリーは維持。
+     * wp_set_post_categoriesの第3引数trueで「置き換え」ではなく「追記」にする）。
+     * 判定材料は post_title と note_full_title の両方をORで見る
+     * （どちらか一方でもパターンに合致すれば付与する。優先順位を付けず
+     * 両方チェックすることで、save_postとメタ変更フックのどちらが先に
+     * 走っても取りこぼさない）。
+     */
+    private function maybe_assign_news_category($post_id) {
+        $post = get_post($post_id);
+        if (!$post || $post->post_type !== 'post') {
+            return;
+        }
+        if (in_array($post->post_status, array('auto-draft', 'trash'), true)) {
+            return;
+        }
+
+        $candidate_titles = array(
+            (string) $post->post_title,
+            (string) get_post_meta($post_id, self::FULL_TITLE_META_KEY, true),
+        );
+
+        $matched = false;
+        foreach ($candidate_titles as $t) {
+            if (self::title_looks_like_news($t)) {
+                $matched = true;
+                break;
+            }
+        }
+        if (!$matched) {
+            return;
+        }
+
+        $current = wp_get_post_categories($post_id);
+        if (in_array(self::NEWS_CATEGORY_ID, $current, true)) {
+            return;
+        }
+
+        wp_set_post_categories($post_id, array_merge($current, array(self::NEWS_CATEGORY_ID)), true);
+    }
+
+    public function handle_save_post($post_id, $post, $update) {
+        if (wp_is_post_revision($post_id) || wp_is_post_autosave($post_id)) {
+            return;
+        }
+        $this->maybe_assign_news_category($post_id);
+    }
+
+    /**
+     * note_full_titleメタの書き込み（追加・更新）を捉える。update_post_meta()/
+     * add_post_meta()はDBへの書き込み完了後にこのアクションを発火するため、
+     * save_postと違いここでは新しいメタ値を確実に読める（REST APIでの新規
+     * 投稿作成時、save_postはwp_insert_post直後＝メタ反映前に発火してしまう
+     * ため、この経路が実質的な主な入口になる）。
+     */
+    public function handle_note_full_title_meta_change($meta_id, $object_id, $meta_key, $meta_value) {
+        if ($meta_key !== self::FULL_TITLE_META_KEY) {
+            return;
+        }
+        $this->maybe_assign_news_category($object_id);
     }
 
     /**
      * 【2026-08-16 追記：SEO・UX対応】Google検索結果等から、トップページでは
-     * 既にnote・exblog以外を除外している古いカテゴリー（「ニュース」や
-     * 「TweetTV」関連カテゴリー等）のアーカイブページ（/category/xxx/）へ
-     * 直接アクセスしてくる訪問者がいる。トップページはfilter_front_page_query()
-     * で絞り込み済みだが、カテゴリーアーカイブページ自体は素通しだったため、
-     * そこを直接叩かれると古い記事群がそのまま見えてしまっていた。
+     * 既にnote・exblog以外を除外している古いカテゴリー（「TweetTV」関連
+     * カテゴリー等）のアーカイブページ（/category/xxx/）へ直接アクセスして
+     * くる訪問者がいる。トップページはfilter_front_page_query()で絞り込み
+     * 済みだが、カテゴリーアーカイブページ自体は素通しだったため、そこを
+     * 直接叩かれると古い記事群がそのまま見えてしまっていた。
      * 「表示を許可するカテゴリー（note・exblog）」をDEFAULT_CHECKED（＝
      * filter_front_page_queryと同じ単一の情報源）から動的に導出し、それ以外の
      * カテゴリーアーカイブへのアクセスは全てトップページへ301リダイレクトする。
      * 新しいカテゴリーが増えてもここを個別に追記する必要がないよう、
      * 「除外リストの列挙」ではなく「許可リストにあるかどうか」で判定する設計。
+     *
+     * 【同日追記】「ニュース」カテゴリーは、末尾が「…M/D」形式で終わるnote
+     * 記事を自動分類する生きたアーカイブとして復活させたため、ここでは
+     * リダイレクト対象から個別に除外する。トップページのデフォルト絞り込み
+     * （DEFAULT_CHECKED）には含めない＝トップには出さないが、アーカイブ
+     * ページ単体へのアクセスは許可する、という非対称な扱いのため、
+     * DEFAULT_CHECKEDそのものを変更するのではなくNEWS_CATEGORY_IDをここだけ
+     * 個別に許可リストへ足す。
      */
     public function redirect_legacy_category_archive() {
         if (is_admin() || !is_category() || !is_main_query()) {
@@ -73,7 +172,7 @@ class Custom_Search_Category_Filter {
             return;
         }
 
-        $visible_cat_ids = array();
+        $visible_cat_ids = array(self::NEWS_CATEGORY_ID);
         foreach (self::DEFAULT_CHECKED as $key) {
             if (isset(self::CAT_MAP[$key])) {
                 $visible_cat_ids[] = self::CAT_MAP[$key];
