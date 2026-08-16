@@ -14,6 +14,11 @@ ntfy経由の「確認が取れるまで再通知し続ける」緊急アラー�
   改めてスマホへ送る。
 - 通知の送信タイミング（初回・再通知）ではPCのビープ音も鳴らし、
   スマホが手元になくてもPCの近くにいれば気づけるようにする。
+- `--success` 引数を付けて実行すると「正常完了モード」になり、短い
+  ビープ＋「✅ 作業完了」通知を1回だけ送って即座に終了する（ACK待機
+  ループには入らない）。緊急停止用の trigger_emergency_alarm() とは
+  完全に独立した経路（_send_plain_notification を直接使う）で送るため、
+  actionsペイロードの組み立てミス等が完了通知にまで波及しない。
 """
 
 from __future__ import annotations
@@ -53,14 +58,14 @@ class JunchanAgent:
         self.interval_seconds = interval_seconds
         self.base_url = base_url.rstrip("/")
 
-    def _beep(self, repeats: int = 3) -> None:
+    def _beep(self, freq: int = 1000, duration_ms: int = 500, repeats: int = 3, gap: float = 0.1) -> None:
         if not _WINSOUND_AVAILABLE:
             print("[警告] winsoundが利用できない環境のため、ビープ音をスキップします。")
             return
         try:
             for _ in range(repeats):
-                winsound.Beep(1000, 500)
-                time.sleep(0.1)
+                winsound.Beep(freq, duration_ms)
+                time.sleep(gap)
         except RuntimeError as e:
             print(f"[警告] ビープ音の再生に失敗しました: {e}")
 
@@ -207,8 +212,42 @@ class JunchanAgent:
                 print(f"[終了] 最大試行回数（{max_attempts}回）に達したため終了します。ACKは受信されませんでした。")
                 return False
 
+    def trigger_success_notification(
+        self,
+        message: str = "任されたタスクが正常に完了しました。",
+        title: str = "✅ 作業完了",
+    ) -> bool:
+        """タスク正常完了時の通知。緊急停止モードと異なりACK待機ループには
+        入らず、短いビープと通知を1回ずつ出したら即座に終了する。
+        """
+        print(f"[正常完了] {self.alert_topic} へ完了通知を送信します。")
+        self._beep(freq=1500, duration_ms=150, repeats=3, gap=0.05)
+
+        try:
+            status = self._send_plain_notification(message, title)
+            print(f"[完了通知] 送信成功 status={status}")
+            return True
+        except Exception as e:
+            print(f"[エラー] 完了通知の送信に失敗しました: {e}")
+            return False
+
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="順ちゃんAI緊急停止/完了通知エージェント")
+    parser.add_argument(
+        "--success",
+        action="store_true",
+        help="正常完了モード：完了通知を1回送りビープを鳴らして即終了する（ACK待機ループには入らない）",
+    )
+    args = parser.parse_args()
+
     agent = JunchanAgent()
+
+    if args.success:
+        ok = agent.trigger_success_notification()
+        sys.exit(0 if ok else 1)
+
     result = agent.trigger_emergency_alarm()
     sys.exit(0 if result else 1)
