@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 2.4.1
+ * Version: 2.5.0
  * Author: junchan-world
  */
 
@@ -24,6 +24,17 @@ class Note_Style_Engagement_Bar {
     const CODOC_CACHE_PRICE_KEY = 'codoc_cached_price';
     const CODOC_CACHE_PURCHASED_KEY = 'codoc_cached_purchased_count';
     const CODOC_CACHE_UPDATED_KEY = 'codoc_cache_updated_at';
+    // auto_sync_blogs.py の sync_codoc_discount が90日経過記事の価格を書き換える
+    // "直前"に、値下げ前の元価格を保全するために書き込む専用メタキー。
+    // このメタが無い（＝一度も値下げされていない）記事では、アーカイブ割引ボックスは
+    // 「元がいくらだったか」を断定できないため、現在価格のみを案内する
+    // （[[section 6のprice source of truthルール]]と同様、実測できない数字を捏造しない）。
+    const PRICE_BEFORE_DISCOUNT_KEY = 'codoc_price_before_discount';
+    // note記事に付与されるカテゴリー（custom-search-filter.php の CAT_MAP['note'] と同一ID）。
+    const NOTE_CATEGORY_ID = 2471;
+    // アーカイブ割引ボックスの対象とする経過日数（auto_sync_blogs.py の
+    // CODOC_DISCOUNT_AFTER_DAYS と揃える。値下げ処理の対象記事＝アピール対象記事）。
+    const ARCHIVE_DISCOUNT_AFTER_DAYS = 90;
     const CRON_HOOK = 'nseb_refresh_codoc_cache';
     // 単一記事ページを開くたびのライブ更新（handle_view参照）で、直前に
     // 更新されたばかりのキャッシュを毎回律儀に叩き直さないための最小間隔。
@@ -60,6 +71,10 @@ class Note_Style_Engagement_Bar {
         // 単一記事ページでは、記事本文側に埋め込むボタンと重複しないよう
         // サイドバーのCodocサブスクウィジェットを非表示にする
         add_filter('widget_display_callback', array($this, 'maybe_hide_sidebar_subscription_widget'), 10, 3);
+
+        // note記事（公開から90日以上経過したアーカイブ）の本文冒頭に、
+        // 「当サイトで買うのが一番お得」というアピールボックスを挿入する。
+        add_filter('the_content', array($this, 'prepend_archive_discount_box'));
 
         // 一覧カードの概要（抜粋）が、本文冒頭に挿入した赤い案内枠
         // （「💡この記事を単品で読みたい方へ」定型文）から始まってしまうため、
@@ -120,6 +135,9 @@ class Note_Style_Engagement_Bar {
             'type' => 'integer', 'single' => true, 'show_in_rest' => true, 'default' => 0,
         ));
         register_post_meta('post', self::CODOC_CACHE_UPDATED_KEY, array(
+            'type' => 'integer', 'single' => true, 'show_in_rest' => true, 'default' => 0,
+        ));
+        register_post_meta('post', self::PRICE_BEFORE_DISCOUNT_KEY, array(
             'type' => 'integer', 'single' => true, 'show_in_rest' => true, 'default' => 0,
         ));
         // 既存のcodoc_entry_code（インポート時に設定済み）を読み取り専用でREST公開する。
@@ -1287,6 +1305,75 @@ class Note_Style_Engagement_Bar {
             return false;
         }
         return $instance;
+    }
+
+    /**
+     * 2026-08-23 追記：note記事（公開から90日以上経過したアーカイブ）は
+     * auto_sync_blogs.py の sync_codoc_discount により、当サイト限定で
+     * 元値>100円だったものは100円まで値下げ済みになる。この既存の値下げに
+     * 読者が気づけるよう、本文冒頭にアピールボックスを挿入する。
+     *
+     * 表示価格は必ず CODOC_CACHE_PRICE_KEY（本文embedded codoc-blockのpriceを
+     * ライブ更新で反映したキャッシュ値。[[section 6のprice source of truthルール]]
+     * と同じ値）から動的に読む。「note定価◯円から」の比較文言は、値下げ実行時に
+     * sync_codoc_discount が PRICE_BEFORE_DISCOUNT_KEY へ保存した実測の元価格が
+     * ある場合のみ表示し、無い記事（未値下げ・元から100円以下だった等）では
+     * 実測できない金額を捏造せず、現在価格のみを案内する。
+     */
+    public function prepend_archive_discount_box($content) {
+        if (is_admin() || !is_single() || !in_the_loop() || !is_main_query()) {
+            return $content;
+        }
+        global $post;
+        if (!$post || get_post_type($post) !== 'post' || !has_category(self::NOTE_CATEGORY_ID, $post)) {
+            return $content;
+        }
+        $entry_code = get_post_meta($post->ID, 'codoc_entry_code', true);
+        if (!$entry_code) {
+            return $content; // Codocの有料エントリーが無い（無料）記事は対象外
+        }
+        $post_timestamp = get_post_time('U', false, $post);
+        if (!$post_timestamp || (current_time('timestamp') - $post_timestamp) < self::ARCHIVE_DISCOUNT_AFTER_DAYS * DAY_IN_SECONDS) {
+            return $content;
+        }
+        $current_price = (int) get_post_meta($post->ID, self::CODOC_CACHE_PRICE_KEY, true);
+        if ($current_price <= 0) {
+            return $content; // 価格キャッシュ未取得 or 実質無料記事
+        }
+        // 90日経過済みでも、auto_sync_blogs.py の値下げ処理（discount-codoc）が
+        // まだそのタイミングで実行されておらず、実際にはまだ note 定価のまま
+        // （値下げされていない）記事が存在しうる（実機確認済み）。「当サイト限定の
+        // 特別価格」という表現は実際に値下げ後の価格（CODOC_DISCOUNT_PRICE=100円）
+        // でなければ事実と異なるため、現在価格が100円を超える記事では表示しない。
+        if ($current_price > 100) {
+            return $content;
+        }
+        $before_price = (int) get_post_meta($post->ID, self::PRICE_BEFORE_DISCOUNT_KEY, true);
+
+        if ($before_price > $current_price) {
+            $price_line = sprintf(
+                '本記事は公開から3ヶ月以上経過したアーカイブのため、<strong>当サイト限定の特別価格【%d円】</strong>（note定価%d円から%d円引き）でお読みいただけます。',
+                $current_price, $before_price, $before_price - $current_price
+            );
+        } else {
+            $price_line = sprintf(
+                '本記事は公開から3ヶ月以上経過したアーカイブのため、<strong>当サイト限定の特別価格【%d円】</strong>でお読みいただけます。',
+                $current_price
+            );
+        }
+
+        $box = '<div class="archive-discount-box" style="background-color: #fdfbf7; border: 2px solid #e6b422; border-radius: 8px; padding: 15px; margin-bottom: 25px;">'
+            . '<p style="margin: 0 0 10px; font-weight: bold; font-size: 1.1em; color: #d32f2f;">💡 この記事は当サイトで買うのが一番お得です！</p>'
+            . '<p style="margin: 0 0 10px; font-size: 0.95em; line-height: 1.6;">'
+            . $price_line
+            . '<br>※そのまま下へスクロールし、記事内の購入ボタンからお進みください。'
+            . '</p>'
+            . '<p style="margin: 0; font-size: 0.85em; color: #666;">'
+            . '※noteアカウント側に購入履歴を保存したい方のみ、記事内のnote元リンクをご利用ください。'
+            . '</p>'
+            . '</div>';
+
+        return $box . $content;
     }
 }
 
