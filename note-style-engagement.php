@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 2.5.0
+ * Version: 2.5.1
  * Author: junchan-world
  */
 
@@ -1313,12 +1313,16 @@ class Note_Style_Engagement_Bar {
      * 元値>100円だったものは100円まで値下げ済みになる。この既存の値下げに
      * 読者が気づけるよう、本文冒頭にアピールボックスを挿入する。
      *
-     * 表示価格は必ず CODOC_CACHE_PRICE_KEY（本文embedded codoc-blockのpriceを
-     * ライブ更新で反映したキャッシュ値。[[section 6のprice source of truthルール]]
-     * と同じ値）から動的に読む。「note定価◯円から」の比較文言は、値下げ実行時に
-     * sync_codoc_discount が PRICE_BEFORE_DISCOUNT_KEY へ保存した実測の元価格が
-     * ある場合のみ表示し、無い記事（未値下げ・元から100円以下だった等）では
-     * 実測できない金額を捏造せず、現在価格のみを案内する。
+     * 【2026-08-24 追記：表示条件の厳格化】当初は現在価格が100円であれば
+     * （値下げ履歴の有無に関わらず）表示していたが、これだと「最初から100円で
+     * 販売されている記事」（実際には値下げされていない）にまで「特別価格」を
+     * 謳ってしまい事実と異なる、との指摘を受けて修正した。実際に値下げされた
+     * ことが確認できる記事（sync_codoc_discount実行時に元価格をPRICE_BEFORE_DISCOUNT_KEY
+     * へ保存済み、かつその元価格が100円を超えている＝実際に値下げが発生した）
+     * にのみ表示するようにし、それ以外（値下げ履歴が無い・元から100円以下
+     * だった記事）は非表示にする。表示価格自体は引き続き CODOC_CACHE_PRICE_KEY
+     * （本文embedded codoc-blockのpriceをライブ更新で反映したキャッシュ値。
+     * [[section 6のprice source of truthルール]]と同じ値）から動的に読む。
      */
     public function prepend_archive_discount_box($content) {
         if (is_admin() || !is_single() || !in_the_loop() || !is_main_query()) {
@@ -1337,30 +1341,18 @@ class Note_Style_Engagement_Bar {
             return $content;
         }
         $current_price = (int) get_post_meta($post->ID, self::CODOC_CACHE_PRICE_KEY, true);
-        if ($current_price <= 0) {
-            return $content; // 価格キャッシュ未取得 or 実質無料記事
-        }
-        // 90日経過済みでも、auto_sync_blogs.py の値下げ処理（discount-codoc）が
-        // まだそのタイミングで実行されておらず、実際にはまだ note 定価のまま
-        // （値下げされていない）記事が存在しうる（実機確認済み）。「当サイト限定の
-        // 特別価格」という表現は実際に値下げ後の価格（CODOC_DISCOUNT_PRICE=100円）
-        // でなければ事実と異なるため、現在価格が100円を超える記事では表示しない。
-        if ($current_price > 100) {
-            return $content;
+        if ($current_price !== 100) {
+            return $content; // 値下げ後の特別価格（100円）ちょうどでなければ対象外
         }
         $before_price = (int) get_post_meta($post->ID, self::PRICE_BEFORE_DISCOUNT_KEY, true);
-
-        if ($before_price > $current_price) {
-            $price_line = sprintf(
-                '本記事は公開から3ヶ月以上経過したアーカイブのため、<strong>当サイト限定の特別価格【%d円】</strong>（note定価%d円から%d円引き）でお読みいただけます。',
-                $current_price, $before_price, $before_price - $current_price
-            );
-        } else {
-            $price_line = sprintf(
-                '本記事は公開から3ヶ月以上経過したアーカイブのため、<strong>当サイト限定の特別価格【%d円】</strong>でお読みいただけます。',
-                $current_price
-            );
+        if ($before_price <= 100) {
+            return $content; // 値下げ履歴が無い、または元から100円以下だった記事は対象外
         }
+
+        $price_line = sprintf(
+            '本記事は公開から3ヶ月以上経過したアーカイブのため、<strong>当サイト限定の特別価格【%d円】</strong>（note定価%d円から%d円引き）でお読みいただけます。',
+            $current_price, $before_price, $before_price - $current_price
+        );
 
         $box = '<div class="archive-discount-box" style="background-color: #fdfbf7; border: 2px solid #e6b422; border-radius: 8px; padding: 15px; margin-bottom: 25px;">'
             . '<p style="margin: 0 0 10px; font-weight: bold; font-size: 1.1em; color: #d32f2f;">💡 この記事は当サイトで買うのが一番お得です！</p>'

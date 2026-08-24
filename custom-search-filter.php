@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.4.0
+ * Version: 1.5.0
  * Author: junchan-world
  */
 
@@ -45,6 +45,15 @@ class Custom_Search_Category_Filter {
     const FULL_TITLE_META_KEY = 'note_full_title';
     const FULL_TITLE_JOIN_ALIAS = 'note_full_title_meta';
 
+    // 【2026-08-24 追記】TweetTVの移行時に作成された一部の運用・テンプレート用
+    // 投稿（「緊急重要リンク」「ヘッダーログ」「テンプレート」カテゴリー等）に、
+    // 実際の公開日が不明なまま1911年・1912年という誤ったpost_dateが設定された
+    // ままになっており、サイドバーの月別アーカイブ一覧（wp_get_archives）に
+    // ありえない年月として表示されてしまっていた。正しい公開日が判明していない
+    // 以上、日付を推測で書き換える（正常化）のではなく、アーカイブ一覧の生成
+    // クエリ側でこの現実的でない期間を除外する方式を採用する。
+    const ARCHIVE_MIN_DATE = '2000-01-01 00:00:00';
+
     public function __construct() {
         add_action('pre_get_posts', array($this, 'filter_search_query'));
         add_action('pre_get_posts', array($this, 'filter_front_page_query'));
@@ -53,6 +62,9 @@ class Custom_Search_Category_Filter {
         add_filter('posts_search', array($this, 'extend_search_to_full_title'), 10, 2);
         add_filter('posts_distinct', array($this, 'force_distinct_on_search'), 10, 2);
         add_filter('posts_orderby', array($this, 'prioritize_title_matches'), 10, 2);
+        // サイドバー等の月別/年別アーカイブ一覧から、ARCHIVE_MIN_DATE より前の
+        // （実際には存在しないはずの）年月を除外する。
+        add_filter('getarchives_where', array($this, 'filter_archives_where'));
 
         // 【2026-08-16 追記：「ニュース」カテゴリー復活・自動分類】
         // save_postはREST経由の新規作成時、note_full_titleメタが未反映の
@@ -338,6 +350,17 @@ class Custom_Search_Category_Filter {
             return 'DISTINCT';
         }
         return $distinct;
+    }
+
+    /**
+     * wp_get_archives()（サイドバー等の月別/年別アーカイブ一覧ウィジェット）の
+     * SQL WHERE句に、ARCHIVE_MIN_DATE以降という条件を追加する。post_date自体は
+     * 書き換えず、一覧表示からのみ除外することで、正しい公開日が不明な投稿の
+     * 日付を推測で捏造することを避ける。
+     */
+    public function filter_archives_where($where) {
+        global $wpdb;
+        return $where . $wpdb->prepare(' AND post_date >= %s', self::ARCHIVE_MIN_DATE);
     }
 }
 
