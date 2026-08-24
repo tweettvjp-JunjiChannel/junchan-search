@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 2.5.1
+ * Version: 2.6.0
  * Author: junchan-world
  */
 
@@ -646,28 +646,21 @@ class Note_Style_Engagement_Bar {
       savePurchasedSet(set);
     }
   }
-  // 「スキ」のeffectiveLikedと同じ論理整合性ガード：購入済みフラグが立っていても
-  // 記事側の購入数集計（d.purchased_count）が0以下（＝データ不整合）なら赤点灯させない。
-  // purchased_countがnull/undefined（＝まだ応答が来ていない、または無料記事）の場合は
-  // 判定できないのでLocalStorageのフラグをそのまま暫定表示に使う。
-  function effectivePurchased(postId, count) {
-    var flagged = isPurchased(postId);
-    if (!flagged) { return false; }
-    if (count === null || typeof count === 'undefined') { return true; }
-    return count > 0;
-  }
-  function purgeStalePurchases(ids) {
-    if (!ids || !ids.length) { return; }
-    var set = getPurchasedSet();
-    var changed = false;
-    ids.forEach(function (id) {
-      var idx = set.indexOf(id);
-      if (idx !== -1) { set.splice(idx, 1); changed = true; }
-    });
-    if (changed) {
-      savePurchasedSet(set);
-      console.warn('[nseb] 購入済みフラグとカウントの不整合(カウント0)を検知し自動補正しました: ids=' + ids.join(','));
-    }
+  // 【2026-08-25 修正】「スキ」のeffectiveLikedと同じ「count<=0なら赤点灯させない」
+  // ガードを以前は購入済みバッジにも適用していたが、これは前提が異なり誤りだった。
+  // 「いいね」はこのサイト自身のカウンター（postLikeで自分がインクリメントした値を
+  // 自分で読み返す）なので、count と「自分がいいね済みか」は同じデータソースに
+  // 由来し常に整合する。一方、購入数バッジの count（d.purchased_count）は
+  // Codocの公開API由来の集計値で、[[section 14で確認済みの通り実売上を反映せず
+  // 0のまま止まることがある信頼できない値]]。対して「自分が購入済みか」の
+  // フラグ（isPurchased）は checkCodocPurchaseState がCodocウィジェット自身の
+  // DOM（ロック解除状態）を直接観測して立てる、count非依存のより確実な証拠。
+  // そのため count<=0 を理由にこのフラグを不採用・削除（purge）すると、
+  // 「ログイン済みで実際にロック解除されているのに、Codoc側の集計が0のままだと
+  // 永久にグレー表示のまま」という今回報告された不具合を自ら発生させてしまう。
+  // 購入済みフラグは count を一切参照せず、LocalStorageの観測結果をそのまま信用する。
+  function effectivePurchased(postId) {
+    return isPurchased(postId);
   }
 
   // 【2026-08-14追記：購入済み状態の検出】このサイトにはログイン機能が無いため
@@ -922,15 +915,10 @@ class Note_Style_Engagement_Bar {
         purchasedEl.appendChild(icon);
         purchasedEl.appendChild(document.createTextNode(label + 'が購入'));
 
-        // サーバー側の実カウントが確定したので、それを根拠に最終判定し直す
-        // （スキと同じ論理整合性ガード。purchased_countが0以下なのに
-        // 購入済みフラグだけ残っている不整合は自己修復する）。
-        var wasPurchasedFlagged = isPurchased(postId);
-        var purchasedNow = effectivePurchased(postId, purchasedCount);
-        purchasedEl.classList.toggle('is-purchased', purchasedNow);
-        if (wasPurchasedFlagged && purchasedCount !== null && purchasedCount !== undefined && purchasedCount <= 0) {
-          purgeStalePurchases([postId]);
-        }
+        // 購入済みバッジの赤点灯は purchased_count を参照しない
+        // （effectivePurchasedのコメント参照。countはCodoc集計の遅延・不整合の
+        // 影響を受けるため、DOM観測ベースのLocalStorageフラグのみを信用する）。
+        purchasedEl.classList.toggle('is-purchased', effectivePurchased(postId));
       }
     });
 
@@ -1018,7 +1006,6 @@ class Note_Style_Engagement_Bar {
   // 補正した上でLocalStorage側も自動で消す（不整合データの自己修復）。
   function renderCardBadges(idToMetaEl, data) {
     var staleIds = [];
-    var stalePurchaseIds = [];
     Object.keys(data).forEach(function (id) {
       var metaEl = idToMetaEl[id];
       if (!metaEl) { return; }
@@ -1066,11 +1053,10 @@ class Note_Style_Engagement_Bar {
       // 無い＝無料記事）の場合のみ非表示にし、有料記事は0人でも必ず表示して
       // 詳細ページと仕様を統一する。
       if (d.purchased_count !== null && d.purchased_count !== undefined) {
-        // 「スキ」と同様、このブラウザが購入済み（単体購入 or 購読中。
-        // checkCodocPurchaseState参照）と分かっていれば赤くハイライトする。
-        var wasPurchasedFlagged = isPurchased(numericId);
-        var purchasedHere = effectivePurchased(numericId, d.purchased_count);
-        if (wasPurchasedFlagged && !purchasedHere) { stalePurchaseIds.push(numericId); }
+        // このブラウザが購入済み（単体購入 or 購読中。checkCodocPurchaseState
+        // 参照）と分かっていれば赤くハイライトする。purchased_countの値には
+        // 依存しない（effectivePurchasedのコメント参照）。
+        var purchasedHere = effectivePurchased(numericId);
 
         var purchasedBadge = document.createElement('span');
         purchasedBadge.className = 'nseb-card-badge nseb-card-purchased' + (purchasedHere ? ' is-purchased' : '');
@@ -1079,7 +1065,6 @@ class Note_Style_Engagement_Bar {
       }
     });
     purgeStaleLikes(staleIds);
-    purgeStalePurchases(stalePurchaseIds);
   }
 
   function initCardBadges() {
