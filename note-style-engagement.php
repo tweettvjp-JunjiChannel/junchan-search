@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 2.6.0
+ * Version: 2.7.0
  * Author: junchan-world
  */
 
@@ -512,8 +512,8 @@ class Note_Style_Engagement_Bar {
 .nseb-card-badge.nseb-card-views{background:#f1f1f1;color:#666;}
 .nseb-card-badge.nseb-card-like{background:#fdeef1;color:#e0245e;opacity:.75;}
 .nseb-card-badge.nseb-card-like.is-liked{opacity:1;background:#fbdbe2;}
-.nseb-card-badge.nseb-card-purchased{background:#eef3fb;color:#3a6bc9;opacity:.75;}
-.nseb-card-badge.nseb-card-purchased.is-purchased{opacity:1;background:#fbdbe2;color:#e0245e;}
+.nseb-card-badge.nseb-card-purchased{background:#f1f1f1;color:#666;}
+.nseb-card-badge.nseb-card-purchased.is-purchased{background:#fbdbe2;color:#e0245e;}
 .nseb-stat-purchased.is-purchased{color:#e0245e;font-weight:bold;}
 </style>
         <?php
@@ -661,6 +661,42 @@ class Note_Style_Engagement_Bar {
   // 購入済みフラグは count を一切参照せず、LocalStorageの観測結果をそのまま信用する。
   function effectivePurchased(postId) {
     return isPurchased(postId);
+  }
+
+  // 【2026-08-26 追記：購入済みバッジの表示ロジックを一本化】以前は「色だけ
+  // 赤くして文言は『0人が購入』のまま」という中途半端な実装になっており、
+  // 「1人買ったのに0人？」という矛盾した見え方をしていた。詳細ページの
+  // ステータスバーと一覧カードの両方が必ず同じ結論になるよう、判定ロジック
+  // をこの1箇所に集約する。
+  //   ・このブラウザが購入済み/購読中と判明している場合（purchasedHere）：
+  //     カウントの値に関わらず必ず「購入済み」表示にする。カウント文字列
+  //     （「0人が購入」等）は一切出さない。
+  //   ・そうでない場合、カウントが1人以上ならグレーで人数を表示する。
+  //     カウントが0（または無料記事等でそもそもカウントが存在しない＝
+  //     null/undefined）の場合は、ネガティブな「0人が購入」を読者に見せない
+  //     ため、バッジ自体を非表示にする。
+  function computePurchasedBadgeState(purchasedCount, purchasedHere) {
+    if (purchasedHere) {
+      return { show: true, purchased: true };
+    }
+    return { show: typeof purchasedCount === 'number' && purchasedCount >= 1, purchased: false };
+  }
+
+  // 詳細ページのステータスバー用。既存の<span>要素を使い回し、非表示時は
+  // hidden属性とstyle.displayの両方で確実に隠す（Cocoon側のCSSリセットに
+  // よる[hidden]の無効化を警戒し、インラインstyleでも重ねて指定する）。
+  function renderPurchasedStat(el, state, label) {
+    if (!el) { return; }
+    el.hidden = !state.show;
+    el.style.display = state.show ? '' : 'none';
+    el.classList.toggle('is-purchased', state.purchased);
+    el.textContent = '';
+    if (!state.show) { return; }
+    var icon = document.createElement('span');
+    icon.className = 'nseb-stat-icon';
+    icon.textContent = '🛒';
+    el.appendChild(icon);
+    el.appendChild(document.createTextNode(label));
   }
 
   // 【2026-08-14追記：購入済み状態の検出】このサイトにはログイン機能が無いため
@@ -846,10 +882,11 @@ class Note_Style_Engagement_Bar {
     // 分かったら購入済みフラグを記録する（checkCodocPurchaseStateのコメント参照）。
     checkCodocPurchaseState(postId);
     var purchasedEl = bar.querySelector('.nseb-stat-purchased');
-    if (purchasedEl && isPurchased(postId)) {
-      // ネットワーク応答を待たず、既知のフラグだけで即座に赤くしておく
-      // （最終的な数値ラベルはcard-data応答後に描画）。
-      purchasedEl.classList.add('is-purchased');
+    if (purchasedEl && effectivePurchased(postId)) {
+      // ネットワーク応答を待たず、既知のフラグだけで即座に「🛒 購入済み」を
+      // 赤色で描画しておく（カウントに依存しないため、応答を待つ理由が無い）。
+      purchasedEl.classList.remove('nseb-skeleton');
+      renderPurchasedStat(purchasedEl, { show: true, purchased: true }, '購入済み');
     }
 
     // postView(postId) は「このページを開いた」というPVを実際に+1記録し、
@@ -905,20 +942,9 @@ class Note_Style_Engagement_Bar {
 
       if (purchasedEl) {
         purchasedEl.classList.remove('nseb-skeleton');
-        var purchasedCount = d.purchased_count;
-        var label = (purchasedCount === null || purchasedCount === undefined)
-          ? '-' : fmt(purchasedCount) + '人';
-        purchasedEl.textContent = '';
-        var icon = document.createElement('span');
-        icon.className = 'nseb-stat-icon';
-        icon.textContent = '🛒';
-        purchasedEl.appendChild(icon);
-        purchasedEl.appendChild(document.createTextNode(label + 'が購入'));
-
-        // 購入済みバッジの赤点灯は purchased_count を参照しない
-        // （effectivePurchasedのコメント参照。countはCodoc集計の遅延・不整合の
-        // 影響を受けるため、DOM観測ベースのLocalStorageフラグのみを信用する）。
-        purchasedEl.classList.toggle('is-purchased', effectivePurchased(postId));
+        var purchasedState = computePurchasedBadgeState(d.purchased_count, effectivePurchased(postId));
+        var purchasedLabel = purchasedState.purchased ? '購入済み' : (fmt(d.purchased_count) + '人が購入');
+        renderPurchasedStat(purchasedEl, purchasedState, purchasedLabel);
       }
     });
 
@@ -1046,21 +1072,16 @@ class Note_Style_Engagement_Bar {
       likeBadge.textContent = (liked ? '♥' : '♡') + fmt(d.like_count);
       wrap.appendChild(likeBadge);
 
-      // 【2026-08-14修正】以前は購入数が1以上の場合のみバッジを表示していたが、
-      // これだと「有料記事なのに誰もまだ買っていない」記事は詳細ページには
-      // 「🛒0人が購入」バッジがあるのに一覧には何も出ない、という矛盾した
-      // 見え方になっていた。purchased_countがnull（＝Codocエントリー自体が
-      // 無い＝無料記事）の場合のみ非表示にし、有料記事は0人でも必ず表示して
-      // 詳細ページと仕様を統一する。
-      if (d.purchased_count !== null && d.purchased_count !== undefined) {
-        // このブラウザが購入済み（単体購入 or 購読中。checkCodocPurchaseState
-        // 参照）と分かっていれば赤くハイライトする。purchased_countの値には
-        // 依存しない（effectivePurchasedのコメント参照）。
-        var purchasedHere = effectivePurchased(numericId);
-
+      // 【2026-08-26修正】computePurchasedBadgeStateで詳細ページと同じ判定に
+      // 統一した：このブラウザが購入済み/購読中なら常に「🛒購入済み」を赤色で
+      // 表示し、そうでなければ購入数が1人以上のときのみグレーで人数を表示、
+      // 0人（または無料記事等でカウント自体が無い）場合はバッジ自体を作らない
+      // （「0人が購入」というネガティブな情報を読者に見せない）。
+      var purchasedState = computePurchasedBadgeState(d.purchased_count, effectivePurchased(numericId));
+      if (purchasedState.show) {
         var purchasedBadge = document.createElement('span');
-        purchasedBadge.className = 'nseb-card-badge nseb-card-purchased' + (purchasedHere ? ' is-purchased' : '');
-        purchasedBadge.textContent = '🛒' + fmt(d.purchased_count);
+        purchasedBadge.className = 'nseb-card-badge nseb-card-purchased' + (purchasedState.purchased ? ' is-purchased' : '');
+        purchasedBadge.textContent = purchasedState.purchased ? '🛒購入済み' : ('🛒' + fmt(d.purchased_count));
         wrap.appendChild(purchasedBadge);
       }
     });
