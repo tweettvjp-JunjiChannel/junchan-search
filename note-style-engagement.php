@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 2.7.0
+ * Version: 2.8.0
  * Author: junchan-world
  */
 
@@ -536,6 +536,9 @@ class Note_Style_Engagement_Bar {
   'use strict';
 
   var restRoot = <?php echo wp_json_encode($rest_root); ?>;
+  // PHP側の定数（CONTENT_SUBSCRIPTION_DOM_ID）と単一の出所を保つため、
+  // 文字列をJS側にハードコードせずここで注入する。
+  var CONTENT_SUBSCRIPTION_DOM_ID = <?php echo wp_json_encode(self::CONTENT_SUBSCRIPTION_DOM_ID); ?>;
   var LIKED_KEY = 'nseb_liked_posts';
   // 2026-08-14追記：「購入済み」の個人状態をこのブラウザで記憶するためのキー。
   // 詳細ページを開いた際、Codoc自身の購入ウィジェット（.wp-block-codoc-codoc-block）が
@@ -699,6 +702,39 @@ class Note_Style_Engagement_Bar {
     el.appendChild(document.createTextNode(label));
   }
 
+  // 【2026-08-25追記：購入済み/アンロック後もサブスク誘導バナーが残る不具合の
+  // 修正】Codoc自身のペイウォールは正しく解除され本文は最後まで読めているのに、
+  // 本文冒頭の無料プレビューエリアに置かれた「単品で買うより断然お得なサブスク」
+  // 誘導枠（赤枠。auto_sync_blogs.pyがcodoc-blockの手前に挿入する定型ブロック）と、
+  // アーカイブ割引ボックス（.archive-discount-box）が、購入・アンロック後も
+  // そのまま表示され続けていたため、読者が「まだ課金が必要なのか」と誤解する
+  // 事故が実機（スマホ）の報告で判明した。購入済みと判定できた時点でこの2つを
+  // 非表示にする。
+  //
+  // 赤枠サブスク誘導ボックスにはクラス名が付いていないため、本文中に唯一
+  // 埋め込まれるサブスクウィジェット自身（CONTENT_SUBSCRIPTION_DOM_ID。
+  // strip_upsell_box()のマーカーと同じ値）を起点に、.entry-content の直下の
+  // 子要素になるまで祖先を遡って特定する（サイドバー側にも同じIDの別要素が
+  // 存在するため、必ず.entry-content内に絞り込んだ上で起点を探す）。
+  function hideUpsellBanners() {
+    var content = document.querySelector('.entry-content');
+    if (!content) { return; }
+
+    var discountBox = content.querySelector('.archive-discount-box');
+    if (discountBox) { discountBox.style.display = 'none'; }
+
+    var widget = content.querySelector('#' + CONTENT_SUBSCRIPTION_DOM_ID);
+    if (widget) {
+      var node = widget;
+      while (node && node.parentElement && node.parentElement !== content) {
+        node = node.parentElement;
+      }
+      if (node && node.parentElement === content) {
+        node.style.display = 'none';
+      }
+    }
+  }
+
   // 【2026-08-14追記：購入済み状態の検出】このサイトにはログイン機能が無いため
   // （section 10のスキと同じ制約）、「このブラウザが過去に買ったか」を
   // サーバー側で直接知る手段は無い。唯一の手がかりは、Codoc自身の購入ウィジェット
@@ -765,6 +801,7 @@ class Note_Style_Engagement_Bar {
 
       if (buyWrapHidden || hasUser || hasUnlockedBody) {
         markPurchased(postId);
+        hideUpsellBanners();
       }
     }
     evaluate();
@@ -882,11 +919,15 @@ class Note_Style_Engagement_Bar {
     // 分かったら購入済みフラグを記録する（checkCodocPurchaseStateのコメント参照）。
     checkCodocPurchaseState(postId);
     var purchasedEl = bar.querySelector('.nseb-stat-purchased');
-    if (purchasedEl && effectivePurchased(postId)) {
+    if (effectivePurchased(postId)) {
       // ネットワーク応答を待たず、既知のフラグだけで即座に「🛒 購入済み」を
-      // 赤色で描画しておく（カウントに依存しないため、応答を待つ理由が無い）。
-      purchasedEl.classList.remove('nseb-skeleton');
-      renderPurchasedStat(purchasedEl, { show: true, purchased: true }, '購入済み');
+      // 赤色で描画し、サブスク誘導バナーも即座に隠しておく（カウントにも
+      // ネットワーク応答にも依存しないため、待つ理由が無い）。
+      if (purchasedEl) {
+        purchasedEl.classList.remove('nseb-skeleton');
+        renderPurchasedStat(purchasedEl, { show: true, purchased: true }, '購入済み');
+      }
+      hideUpsellBanners();
     }
 
     // postView(postId) は「このページを開いた」というPVを実際に+1記録し、
