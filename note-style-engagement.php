@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 3.0.1
+ * Version: 3.1.0
  * Author: junchan-world
  */
 
@@ -1249,15 +1249,42 @@ class Note_Style_Engagement_Bar {
     var wantPurchased = !!(purchasedCb && purchasedCb.checked);
     var wantLiked = !!(likedCb && likedCb.checked);
 
-    document.querySelectorAll('article[id^="post-"]').forEach(function (art) {
+    var articles = document.querySelectorAll('article[id^="post-"]');
+    var anyVisible = false;
+    articles.forEach(function (art) {
       if (!wantPurchased && !wantLiked) {
         art.style.display = '';
+        anyVisible = true;
         return;
       }
       var matchesPurchased = wantPurchased && !!art.querySelector('.nseb-card-purchased.is-purchased');
       var matchesLiked = wantLiked && !!art.querySelector('.nseb-card-like.is-liked');
-      art.style.display = (matchesPurchased || matchesLiked) ? '' : 'none';
+      var show = matchesPurchased || matchesLiked;
+      art.style.display = show ? '' : 'none';
+      if (show) { anyVisible = true; }
     });
+
+    // 【2026-08-29追記：クライアント側限定の絞り込みの限界を補う案内】
+    // 購入済み/スキ絞り込みはサーバー側のページネーションとは無関係に、
+    // 今表示中のページ内だけでshow/hideしているため、「このページには
+    // 該当記事が無い（他のページにはあるかもしれない）」という状態が起こり
+    // うる。何も表示されない空白画面のまま放置すると壊れて見えるため、
+    // その場合のみ案内文を出す（articleの増減はしないため既存レイアウトは
+    // 壊さない）。
+    var noticeId = 'nseb-meta-filter-empty-notice';
+    var existingNotice = document.getElementById(noticeId);
+    var listContainer = articles.length ? articles[0].closest('#list, .list') : null;
+    if ((wantPurchased || wantLiked) && !anyVisible && listContainer) {
+      if (!existingNotice) {
+        var notice = document.createElement('p');
+        notice.id = noticeId;
+        notice.style.cssText = 'padding:1.2em;text-align:center;color:#777;';
+        notice.textContent = 'このページには絞り込み条件に一致する記事がありません。他のページもご確認ください。';
+        listContainer.insertBefore(notice, listContainer.firstChild);
+      }
+    } else if (existingNotice) {
+      existingNotice.remove();
+    }
   }
 
   // pageshowでの再実行時にリスナーが二重登録されないよう、bound済み
