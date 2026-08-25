@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 3.0.0
+ * Version: 3.0.1
  * Author: junchan-world
  */
 
@@ -1236,6 +1236,12 @@ class Note_Style_Engagement_Bar {
   // チェックボックス自体は検索フォームウィジェット（custom_html-3、
   // このリポジトリには無い）側の静的HTMLとして追加済みで、name属性を
   // 持たないため既存のfilter_cats[]送信・同期処理には一切干渉しない。
+  //
+  // 【2026-08-29修正】「購入済み」フィルターに、サブスク加入による読み放題
+  // 対象（.is-readfree）まで含まれてしまっていた不具合を修正。「購入済み」は
+  // 単体購入（買い切り）の履歴が実際にある記事（.is-purchased）だけを対象と
+  // し、.is-readfreeは対象外にする（サブスク加入者であっても、その記事を
+  // 個別購入していなければ「購入済み」検索には出さない）。
   function applyMetaFilters() {
     var purchasedCb = document.getElementById('nseb-filter-purchased');
     var likedCb = document.getElementById('nseb-filter-liked');
@@ -1248,7 +1254,7 @@ class Note_Style_Engagement_Bar {
         art.style.display = '';
         return;
       }
-      var matchesPurchased = wantPurchased && !!art.querySelector('.nseb-card-purchased.is-purchased, .nseb-card-purchased.is-readfree');
+      var matchesPurchased = wantPurchased && !!art.querySelector('.nseb-card-purchased.is-purchased');
       var matchesLiked = wantLiked && !!art.querySelector('.nseb-card-like.is-liked');
       art.style.display = (matchesPurchased || matchesLiked) ? '' : 'none';
     });
