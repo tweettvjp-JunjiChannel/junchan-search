@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 2.9.1
+ * Version: 3.0.0
  * Author: junchan-world
  */
 
@@ -514,7 +514,9 @@ class Note_Style_Engagement_Bar {
 .nseb-card-badge.nseb-card-like.is-liked{opacity:1;background:#fbdbe2;}
 .nseb-card-badge.nseb-card-purchased{background:#f1f1f1;color:#666;}
 .nseb-card-badge.nseb-card-purchased.is-purchased{background:#fbdbe2;color:#e0245e;}
+.nseb-card-badge.nseb-card-purchased.is-readfree{background:#e3eefb;color:#2f6690;}
 .nseb-stat-purchased.is-purchased{color:#e0245e;font-weight:bold;}
+.nseb-stat-purchased.is-readfree{color:#2f6690;font-weight:bold;}
 </style>
         <?php
     }
@@ -711,43 +713,66 @@ class Note_Style_Engagement_Bar {
   // 「1人買ったのに0人？」という矛盾した見え方をしていた。詳細ページの
   // ステータスバーと一覧カードの両方が必ず同じ結論になるよう、判定ロジック
   // をこの1箇所に集約する。
-  //   ・このブラウザが購入済み/購読中と判明している場合（purchasedHere）：
-  //     カウントの値に関わらず必ず「購入済み」表示にする。カウント文字列
-  //     （「0人が購入」等）は一切出さない。
-  //   ・そうでない場合、カウントが1人以上ならグレーで人数を表示する。
-  //     カウントが0（または無料記事等でそもそもカウントが存在しない＝
-  //     null/undefined）の場合は、ネガティブな「0人が購入」を読者に見せない
-  //     ため、バッジ自体を非表示にする。
   //
-  // 【2026-08-27 追記：無料記事への誤表示を修正】purchasedCountがnull/undefined
-  // （＝Codocエントリー自体が無い＝無料記事）の場合は、サブスク加入者一括判定
-  // （effectivePurchasedのisActiveSubscriber()）でpurchasedHereがtrueになって
-  // いても「購入済み」にしない。サブスクは有料記事を読み放題にする権利であって、
-  // 無料記事とは無関係なため、そもそも判定対象外にする必要がある。
-  function computePurchasedBadgeState(purchasedCount, purchasedHere) {
+  // 【2026-08-28 追記：3段階表示への改修】以前は「このブラウザが購入済み/
+  // 購読中」を1つのbooleanに畳み込んでいたが、単体購入とサブスク加入は
+  // 読者から見て意味が異なる（買い切りの証拠 vs 定額での読み放題資格）ため、
+  // 表示上も区別してほしいという要望を受けて、次の優先順位でモードを
+  // 3つに分けた：
+  //   mode='purchased'（赤）: この記事個別のアンロックを実際に検出済み
+  //     （checkCodocPurchaseStateの実機検証済みロジック）。サブスク加入者
+  //     であっても、その記事を個別に購入していればこちらを優先表示する
+  //     （「この記事は買い切った」という、より具体的な事実の方が有益なため）。
+  //   mode='readfree'（青）: 個別購入は未検出だが、サブスク加入者と推定
+  //     できている（isActiveSubscriber）。
+  //   mode='count'（グレー）: どちらでもない場合、購入者数が1人以上なら
+  //     人数を表示。0人（または無料記事等でカウント自体が無い＝
+  //     null/undefined）の場合は、ネガティブな「0人が購入」を読者に
+  //     見せないためバッジ自体を非表示にする。
+  // purchasedCountがnull/undefined（＝Codocエントリー自体が無い＝無料記事）
+  // の場合は、individuallyPurchased/isSubscriberの値に関わらず常に非表示にする
+  // （サブスクは有料記事を読み放題にする権利であって無料記事とは無関係なため）。
+  function computeAccessBadgeState(purchasedCount, individuallyPurchased, isSubscriber) {
     var isPaidArticle = purchasedCount !== null && typeof purchasedCount !== 'undefined';
     if (!isPaidArticle) {
-      return { show: false, purchased: false };
+      return { show: false, mode: null };
     }
-    if (purchasedHere) {
-      return { show: true, purchased: true };
+    if (individuallyPurchased) {
+      return { show: true, mode: 'purchased' };
     }
-    return { show: purchasedCount >= 1, purchased: false };
+    if (isSubscriber) {
+      return { show: true, mode: 'readfree' };
+    }
+    return { show: purchasedCount >= 1, mode: 'count' };
   }
 
   // 詳細ページのステータスバー用。既存の<span>要素を使い回し、非表示時は
   // hidden属性とstyle.displayの両方で確実に隠す（Cocoon側のCSSリセットに
   // よる[hidden]の無効化を警戒し、インラインstyleでも重ねて指定する）。
-  function renderPurchasedStat(el, state, label) {
+  // 元の価格バッジ（nseb-price）は消さずそのまま併記する仕様のため、この
+  // 関数はアクセス状態バッジ単体の中身だけを組み立てる。
+  function renderAccessStat(el, state, purchasedCount) {
     if (!el) { return; }
     el.hidden = !state.show;
     el.style.display = state.show ? '' : 'none';
-    el.classList.toggle('is-purchased', state.purchased);
+    el.classList.remove('is-purchased', 'is-readfree');
     el.textContent = '';
     if (!state.show) { return; }
     var icon = document.createElement('span');
     icon.className = 'nseb-stat-icon';
-    icon.textContent = '🛒';
+    var label;
+    if (state.mode === 'purchased') {
+      el.classList.add('is-purchased');
+      icon.textContent = '🛒';
+      label = '購入済み';
+    } else if (state.mode === 'readfree') {
+      el.classList.add('is-readfree');
+      icon.textContent = '📖';
+      label = '読み放題';
+    } else {
+      icon.textContent = '🛒';
+      label = fmt(purchasedCount) + '人が購入';
+    }
     el.appendChild(icon);
     el.appendChild(document.createTextNode(label));
   }
@@ -981,12 +1006,15 @@ class Note_Style_Engagement_Bar {
     // data-paid属性で判定する（build_status_bar_skeleton_html参照）。
     var isPaidArticle = bar.getAttribute('data-paid') === '1';
     if (isPaidArticle && effectivePurchased(postId)) {
-      // ネットワーク応答を待たず、既知のフラグだけで即座に「🛒 購入済み」を
-      // 赤色で描画し、サブスク誘導バナーも即座に隠しておく（カウントにも
-      // ネットワーク応答にも依存しないため、待つ理由が無い）。
+      // ネットワーク応答を待たず、既知のフラグだけで即座に「🛒 購入済み」
+      // または「📖 読み放題」を描画し、サブスク誘導バナーも即座に隠しておく
+      // （カウントにもネットワーク応答にも依存しないため、待つ理由が無い。
+      // どちらのモードかはLocalStorageの2つのフラグだけで判定でき、
+      // これもネットワーク応答を待たずに分かる）。
       if (purchasedEl) {
         purchasedEl.classList.remove('nseb-skeleton');
-        renderPurchasedStat(purchasedEl, { show: true, purchased: true }, '購入済み');
+        var earlyMode = isPurchased(postId) ? 'purchased' : 'readfree';
+        renderAccessStat(purchasedEl, { show: true, mode: earlyMode }, null);
       }
       hideUpsellBanners();
     }
@@ -1044,9 +1072,8 @@ class Note_Style_Engagement_Bar {
 
       if (purchasedEl) {
         purchasedEl.classList.remove('nseb-skeleton');
-        var purchasedState = computePurchasedBadgeState(d.purchased_count, effectivePurchased(postId));
-        var purchasedLabel = purchasedState.purchased ? '購入済み' : (fmt(d.purchased_count) + '人が購入');
-        renderPurchasedStat(purchasedEl, purchasedState, purchasedLabel);
+        var accessState = computeAccessBadgeState(d.purchased_count, isPurchased(postId), isActiveSubscriber());
+        renderAccessStat(purchasedEl, accessState, d.purchased_count);
       }
     });
 
@@ -1159,6 +1186,27 @@ class Note_Style_Engagement_Bar {
       }
       wrap.innerHTML = '';
 
+      // 【2026-08-28修正】アクセス状態バッジ（購入済み/読み放題/購入者数）は
+      // 価格バッジの直前に表示する（元の価格は消さずそのまま併記する仕様。
+      // computeAccessBadgeStateのコメント参照）。
+      var accessState = computeAccessBadgeState(d.purchased_count, isPurchased(numericId), isActiveSubscriber());
+      if (accessState.show) {
+        var accessBadge = document.createElement('span');
+        var accessLabel;
+        if (accessState.mode === 'purchased') {
+          accessBadge.className = 'nseb-card-badge nseb-card-purchased is-purchased';
+          accessLabel = '🛒購入済み';
+        } else if (accessState.mode === 'readfree') {
+          accessBadge.className = 'nseb-card-badge nseb-card-purchased is-readfree';
+          accessLabel = '📖読み放題';
+        } else {
+          accessBadge.className = 'nseb-card-badge nseb-card-purchased';
+          accessLabel = '🛒' + fmt(d.purchased_count);
+        }
+        accessBadge.textContent = accessLabel;
+        wrap.appendChild(accessBadge);
+      }
+
       var priceBadge = document.createElement('span');
       priceBadge.className = 'nseb-card-badge nseb-price ' + (d.is_free ? 'nseb-price-free' : 'nseb-price-paid');
       priceBadge.textContent = d.price_label;
@@ -1173,21 +1221,49 @@ class Note_Style_Engagement_Bar {
       likeBadge.className = 'nseb-card-badge nseb-card-like' + (liked ? ' is-liked' : '');
       likeBadge.textContent = (liked ? '♥' : '♡') + fmt(d.like_count);
       wrap.appendChild(likeBadge);
-
-      // 【2026-08-26修正】computePurchasedBadgeStateで詳細ページと同じ判定に
-      // 統一した：このブラウザが購入済み/購読中なら常に「🛒購入済み」を赤色で
-      // 表示し、そうでなければ購入数が1人以上のときのみグレーで人数を表示、
-      // 0人（または無料記事等でカウント自体が無い）場合はバッジ自体を作らない
-      // （「0人が購入」というネガティブな情報を読者に見せない）。
-      var purchasedState = computePurchasedBadgeState(d.purchased_count, effectivePurchased(numericId));
-      if (purchasedState.show) {
-        var purchasedBadge = document.createElement('span');
-        purchasedBadge.className = 'nseb-card-badge nseb-card-purchased' + (purchasedState.purchased ? ' is-purchased' : '');
-        purchasedBadge.textContent = purchasedState.purchased ? '🛒購入済み' : ('🛒' + fmt(d.purchased_count));
-        wrap.appendChild(purchasedBadge);
-      }
     });
     purgeStaleLikes(staleIds);
+  }
+
+  // 【2026-08-28追記：サイドバー検索欄の「購入済み」「スキ」絞り込み】
+  // サーバー側は購入・スキ状態を一切知らない（LocalStorageのみに存在する
+  // データのため）ので、これはサーバーへの再検索ではなく、今表示されている
+  // 一覧のarticle要素をクライアント側で即座に表示/非表示するだけの機能にする。
+  // 判定は、独自にLocalStorageを読み直すのではなく、renderCardBadgesが
+  // 既に描画済みの各カードのバッジのクラス（.is-purchased/.is-readfree/
+  // .is-liked）をそのまま見る。これによりcomputeAccessBadgeState等の
+  // 判定ロジックと必ず一致し、二重実装によるズレが起きない。
+  // チェックボックス自体は検索フォームウィジェット（custom_html-3、
+  // このリポジトリには無い）側の静的HTMLとして追加済みで、name属性を
+  // 持たないため既存のfilter_cats[]送信・同期処理には一切干渉しない。
+  function applyMetaFilters() {
+    var purchasedCb = document.getElementById('nseb-filter-purchased');
+    var likedCb = document.getElementById('nseb-filter-liked');
+    if (!purchasedCb && !likedCb) { return; }
+    var wantPurchased = !!(purchasedCb && purchasedCb.checked);
+    var wantLiked = !!(likedCb && likedCb.checked);
+
+    document.querySelectorAll('article[id^="post-"]').forEach(function (art) {
+      if (!wantPurchased && !wantLiked) {
+        art.style.display = '';
+        return;
+      }
+      var matchesPurchased = wantPurchased && !!art.querySelector('.nseb-card-purchased.is-purchased, .nseb-card-purchased.is-readfree');
+      var matchesLiked = wantLiked && !!art.querySelector('.nseb-card-like.is-liked');
+      art.style.display = (matchesPurchased || matchesLiked) ? '' : 'none';
+    });
+  }
+
+  // pageshowでの再実行時にリスナーが二重登録されないよう、bound済み
+  // フラグで一度だけ登録する（他のクリックリスナーと同じ方式）。
+  function bindMetaFilterCheckboxes() {
+    ['nseb-filter-purchased', 'nseb-filter-liked'].forEach(function (id) {
+      var cb = document.getElementById(id);
+      if (cb && !cb.dataset.nsebBound) {
+        cb.dataset.nsebBound = '1';
+        cb.addEventListener('change', applyMetaFilters);
+      }
+    });
   }
 
   function initCardBadges() {
@@ -1207,6 +1283,8 @@ class Note_Style_Engagement_Bar {
     });
     if (!ids.length) { return; }
 
+    bindMetaFilterCheckboxes();
+
     // ステップ1: LocalStorageを最優先で参照し、ネットワーク応答を待たずに
     // 即座にハートの見た目だけ書き換える（bfcache復元直後でも一覧に既存の
     // バッジがあればここで赤く点灯する）。
@@ -1218,6 +1296,11 @@ class Note_Style_Engagement_Bar {
     fetchCardData(ids).then(function (data) {
       if (!data) { return; }
       renderCardBadges(idToMetaEl, data);
+      // バッジの最終状態が確定した直後に、既にチェック済みの絞り込みが
+      // あれば反映する（チェックボックスの状態がページ表示前から
+      // 残っている場合でも、フェッチ完了を待たずに一覧全件を再表示した
+      // ままにしない）。
+      applyMetaFilters();
     });
   }
 
@@ -1268,12 +1351,12 @@ class Note_Style_Engagement_Bar {
         ob_start();
         ?>
 <div class="nseb-status-bar" data-post-id="<?php echo esc_attr($post_id); ?>" data-paid="<?php echo $is_paid_article ? '1' : '0'; ?>">
+  <span class="nseb-stat nseb-stat-purchased nseb-skeleton" hidden style="display:none">…</span>
   <span class="nseb-stat nseb-price nseb-skeleton">…</span>
   <span class="nseb-stat nseb-stat-views"><span class="nseb-stat-icon">👁</span><span class="nseb-view-count nseb-skeleton">…</span></span>
   <button type="button" class="nseb-stat nseb-like-btn" data-post-id="<?php echo esc_attr($post_id); ?>">
     <span class="nseb-heart nseb-stat-icon">♡</span><span class="nseb-like-count nseb-skeleton">…</span>
   </button>
-  <span class="nseb-stat nseb-stat-purchased nseb-skeleton">…</span>
 </div>
         <?php
         return ob_get_clean();
