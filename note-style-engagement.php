@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 2.9.0
+ * Version: 2.9.1
  * Author: junchan-world
  */
 
@@ -718,11 +718,21 @@ class Note_Style_Engagement_Bar {
   //     カウントが0（または無料記事等でそもそもカウントが存在しない＝
   //     null/undefined）の場合は、ネガティブな「0人が購入」を読者に見せない
   //     ため、バッジ自体を非表示にする。
+  //
+  // 【2026-08-27 追記：無料記事への誤表示を修正】purchasedCountがnull/undefined
+  // （＝Codocエントリー自体が無い＝無料記事）の場合は、サブスク加入者一括判定
+  // （effectivePurchasedのisActiveSubscriber()）でpurchasedHereがtrueになって
+  // いても「購入済み」にしない。サブスクは有料記事を読み放題にする権利であって、
+  // 無料記事とは無関係なため、そもそも判定対象外にする必要がある。
   function computePurchasedBadgeState(purchasedCount, purchasedHere) {
+    var isPaidArticle = purchasedCount !== null && typeof purchasedCount !== 'undefined';
+    if (!isPaidArticle) {
+      return { show: false, purchased: false };
+    }
     if (purchasedHere) {
       return { show: true, purchased: true };
     }
-    return { show: typeof purchasedCount === 'number' && purchasedCount >= 1, purchased: false };
+    return { show: purchasedCount >= 1, purchased: false };
   }
 
   // 詳細ページのステータスバー用。既存の<span>要素を使い回し、非表示時は
@@ -965,7 +975,12 @@ class Note_Style_Engagement_Bar {
     // 分かったら購入済みフラグを記録する（checkCodocPurchaseStateのコメント参照）。
     checkCodocPurchaseState(postId);
     var purchasedEl = bar.querySelector('.nseb-stat-purchased');
-    if (effectivePurchased(postId)) {
+    // 【2026-08-27追記】無料記事（data-paid="0"）では、サブスク加入者一括判定
+    // だけを根拠に「🛒 購入済み」を早期描画しない（無料記事はそもそもサブスクの
+    // 対象外のため）。有料記事かどうかはスケルトン生成時にPHP側で焼き込んだ
+    // data-paid属性で判定する（build_status_bar_skeleton_html参照）。
+    var isPaidArticle = bar.getAttribute('data-paid') === '1';
+    if (isPaidArticle && effectivePurchased(postId)) {
       // ネットワーク応答を待たず、既知のフラグだけで即座に「🛒 購入済み」を
       // 赤色で描画し、サブスク誘導バナーも即座に隠しておく（カウントにも
       // ネットワーク応答にも依存しないため、待つ理由が無い）。
@@ -1240,11 +1255,19 @@ class Note_Style_Engagement_Bar {
      * JSに描画を委ねる）。the_titleフィルタの都合上、この時点ではまだ<h1>の
      * 中に一時的に挿入されており、正しい位置（<h1>の直後）へはJS側
      * （nseb-frontend.js）が移動させる。
+     *
+     * data-paid のみ例外的に実際の値（codoc_entry_codeの有無）を焼き込む。
+     * 【2026-08-27追記】サブスク加入者一括判定（ACTIVE_SUBSCRIBER_KEY）による
+     * 「🛒 購入済み」の即時（ネットワーク応答を待たない）楽観的描画が、無料記事
+     * （Codocエントリー自体が無い記事）にまで誤って表示されてしまう不具合が
+     * あったため、この判定にはfetch応答を待つ必要がある「価格そのもの」ではなく、
+     * 単なる真偽値（有料記事かどうか）だけをスケルトン生成時点で焼き込む。
      */
     private function build_status_bar_skeleton_html($post_id) {
+        $is_paid_article = (bool) get_post_meta($post_id, 'codoc_entry_code', true);
         ob_start();
         ?>
-<div class="nseb-status-bar" data-post-id="<?php echo esc_attr($post_id); ?>">
+<div class="nseb-status-bar" data-post-id="<?php echo esc_attr($post_id); ?>" data-paid="<?php echo $is_paid_article ? '1' : '0'; ?>">
   <span class="nseb-stat nseb-price nseb-skeleton">…</span>
   <span class="nseb-stat nseb-stat-views"><span class="nseb-stat-icon">👁</span><span class="nseb-view-count nseb-skeleton">…</span></span>
   <button type="button" class="nseb-stat nseb-like-btn" data-post-id="<?php echo esc_attr($post_id); ?>">
