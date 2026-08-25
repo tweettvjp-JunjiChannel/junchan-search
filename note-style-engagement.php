@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 2.8.0
+ * Version: 2.9.0
  * Author: junchan-world
  */
 
@@ -547,6 +547,43 @@ class Note_Style_Engagement_Bar {
   // 自分でボタンを押して切り替えるものではなく、Codoc側の判定結果を観測して
   // 記録するだけの一方向のフラグ（一度立ったら消えない）。
   var PURCHASED_KEY = 'nseb_purchased_posts';
+  // 2026-08-26追記：「サブスク加入中」であることをこのブラウザで記憶する
+  // グローバルフラグ。個別記事ごとの購入済みフラグ（PURCHASED_KEY）とは別に、
+  // 一度サブスク加入者と判定できたら、以後は一覧のどの有料記事カードも
+  // （まだ一度も開いていない記事を含め）「🛒 購入済み」として扱ってよい
+  // ようにするためのもの（effectivePurchased参照）。
+  var ACTIVE_SUBSCRIBER_KEY = 'codoc_active_subscriber';
+  // サブスク加入者かどうかを判定できる確実な信号（Codoc側の実際のDOM構造・
+  // URLパラメータの実在）を、2026-08-26時点では検証できていない
+  // （cms.js・cms-core.js を実際に取得し全文検索したが、依頼にあった
+  // "codoc_conversion" というパラメータ名はどこにも登場しない）。
+  // 未購読者を「購入済み」と誤判定すると売上機会を損なうため
+  // （section 15と同種の、根拠の無いDOM推測による事故を避ける）、
+  // 「このブラウザが異なる記事を複数（SUBSCRIBER_INFERENCE_THRESHOLD件）
+  // 購入済み/アンロック済みと検出した」という、checkCodocPurchaseStateの
+  // 既に実機検証済みのロジックだけを根拠にする、より保守的な代替ロジックを
+  // 採用する。単体購入を2件以上した読者を誤検知するごく小さな可能性は残るが、
+  // 根拠の無いDOM/URL推測よりはるかに安全側に倒した設計。
+  var SUBSCRIBER_INFERENCE_THRESHOLD = 2;
+
+  function isActiveSubscriber() {
+    try { return window.localStorage.getItem(ACTIVE_SUBSCRIBER_KEY) === '1'; } catch (e) { return false; }
+  }
+  function markActiveSubscriber() {
+    try { window.localStorage.setItem(ACTIVE_SUBSCRIBER_KEY, '1'); } catch (e) {}
+  }
+  // 依頼にあった「?codoc_conversion=subscription」URLパラメータの検知。
+  // 実在するかどうか2026-08-26時点では確認できていないが、チェックすること
+  // 自体に副作用は無いため保険として残す（実在しなければ単にこの分岐が
+  // 一度も発火しないだけで、上記の代替ロジックが引き続き機能する）。
+  function checkSubscriptionConversionParam() {
+    try {
+      var params = new URLSearchParams(window.location.search);
+      if (params.get('codoc_conversion') === 'subscription') {
+        markActiveSubscriber();
+      }
+    } catch (e) {}
+  }
 
   function ready(fn) {
     if (document.readyState !== 'loading') { fn(); }
@@ -662,8 +699,11 @@ class Note_Style_Engagement_Bar {
   // 「ログイン済みで実際にロック解除されているのに、Codoc側の集計が0のままだと
   // 永久にグレー表示のまま」という今回報告された不具合を自ら発生させてしまう。
   // 購入済みフラグは count を一切参照せず、LocalStorageの観測結果をそのまま信用する。
+  // 【2026-08-26追記】サブスク加入者（ACTIVE_SUBSCRIBER_KEY）と判定できている
+  // 場合は、この記事個別の購入済みフラグが立っていなくても常に購入済み扱いにする
+  // （サブスク加入者は全有料記事を読める、というサイト側の実際の権限設計に合わせる）。
   function effectivePurchased(postId) {
-    return isPurchased(postId);
+    return isActiveSubscriber() || isPurchased(postId);
   }
 
   // 【2026-08-26 追記：購入済みバッジの表示ロジックを一本化】以前は「色だけ
@@ -802,6 +842,12 @@ class Note_Style_Engagement_Bar {
       if (buyWrapHidden || hasUser || hasUnlockedBody) {
         markPurchased(postId);
         hideUpsellBanners();
+        // 【2026-08-26追記】このブラウザが異なる記事を複数（閾値以上）
+        // 購入済み/アンロック済みと検出した場合、サブスク加入者である可能性が
+        // 高いとみなす（詳細はACTIVE_SUBSCRIBER_KEY定義部のコメント参照）。
+        if (getPurchasedSet().length >= SUBSCRIBER_INFERENCE_THRESHOLD) {
+          markActiveSubscriber();
+        }
       }
     }
     evaluate();
@@ -1165,6 +1211,8 @@ class Note_Style_Engagement_Bar {
     initCardBadges();
   }
 
+  // DOMを触らないため、DOMContentLoadedを待たずページ読み込み直後に判定する。
+  checkSubscriptionConversionParam();
   ready(refreshAll);
 
   // 「戻る」でbfcacheから復元された場合（persisted === true）は
