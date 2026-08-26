@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 3.1.0
+ * Version: 3.1.1
  * Author: junchan-world
  */
 
@@ -1285,6 +1285,18 @@ class Note_Style_Engagement_Bar {
     } else if (existingNotice) {
       existingNotice.remove();
     }
+
+    // 【2026-08-29追記：フィルター適用中はページネーションを非表示にする】
+    // 購入済み/スキ絞り込みはクライアント側限定で、サーバー側の全件数に
+    // 基づくページネーション（「全35ページ」等）とは対応関係が無い。
+    // 絞り込み中にこれを表示したままだと、2ページ目以降に遷移した読者が
+    // 「該当記事なし」の空ページに迷い込む（上のnoticeで案内はしているが、
+    // それ以前にページ送りへ誘導すること自体を避けたい）。フィルターが
+    // 1つでも有効な間はページネーションのラッパー要素ごと非表示にし、
+    // 全て解除されたら通常表示に戻す。
+    document.querySelectorAll('.pagination, .pagination-next, .pagination-prev').forEach(function (el) {
+      el.style.display = (wantPurchased || wantLiked) ? 'none' : '';
+    });
   }
 
   // pageshowでの再実行時にリスナーが二重登録されないよう、bound済み
