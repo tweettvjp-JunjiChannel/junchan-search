@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Junchan World Site Branding
  * Description: ヘッダーロゴ（サイトタイトル）に丸型プロフィール写真とタグラインを統合し、グローバルナビの「準備中」項目にツールチップ・クリック無効化を付与する。
- * Version: 1.3.0
+ * Version: 1.4.0
  * Author: junchan-world
  */
 
@@ -91,6 +91,33 @@ class Junchan_Site_Branding {
 }
 .navi .menu-item.jw-coming-soon > a:hover {
   opacity: 0.6;
+}
+
+/* サイドバー「月額読み放題プラン」（Codocサブスクバナー）：
+   画像をウィジェット幅いっぱいに拡大し、価格ラベルは画像上に
+   フロートオーバーレイ表示する（Codoc純正のcodoc-label自体は
+   既にposition:absoluteだが、位置とデザインをここで上書きする）。 */
+#custom_html-2 .codoc-thumb,
+#custom_html-2 .codoc-thumb img,
+#custom_html-2 .codoc-image {
+  width: 100% !important;
+  height: auto !important;
+}
+#custom_html-2 .codoc-thumb img {
+  display: block !important;
+  object-fit: cover;
+}
+#custom_html-2 .codoc-label {
+  position: absolute !important;
+  top: auto !important;
+  left: auto !important;
+  bottom: 8px !important;
+  right: 8px !important;
+  background: rgba(0,0,0,0.75) !important;
+  color: #fff !important;
+  padding: 4px 10px !important;
+  border-radius: 6px !important;
+  font-weight: bold;
 }
 
 /* 記事カード：抜粋文が長い場合に下部の日付・価格メタ情報と重なる不具合の修正。
