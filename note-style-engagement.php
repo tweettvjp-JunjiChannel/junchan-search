@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 3.1.1
+ * Version: 3.2.0
  * Author: junchan-world
  */
 
@@ -507,6 +507,8 @@ class Note_Style_Engagement_Bar {
 @media (max-width:600px){.nseb-status-bar{font-size:.8em;gap:.5em;padding:.6em .7em;}}
 .nseb-card-badges{display:inline-flex;flex-wrap:wrap;gap:.4em;align-items:center;margin-left:.5em;vertical-align:middle;}
 .nseb-card-badge{display:inline-flex;align-items:center;gap:.2em;font-size:.72em;font-weight:bold;padding:.1em .55em;border-radius:999px;white-space:nowrap;line-height:1.6;}
+button.nseb-card-badge{border:none;font:inherit;cursor:pointer;-webkit-appearance:none;appearance:none;}
+button.nseb-card-badge:active{transform:scale(1.08);}
 .nseb-card-badge.nseb-price-free{background:#e6f7ee;color:#1a9c5c;}
 .nseb-card-badge.nseb-price-paid{background:#fff0e0;color:#e07b00;}
 .nseb-card-badge.nseb-card-views{background:#f1f1f1;color:#666;}
@@ -1217,9 +1219,49 @@ class Note_Style_Engagement_Bar {
       viewBadge.textContent = '👁' + fmt(d.view_count);
       wrap.appendChild(viewBadge);
 
-      var likeBadge = document.createElement('span');
+      // 【2026-08-30追記：一覧カードでの「スキ」直接トグル化】以前は表示専用の
+      // <span>だったが、詳細ページの.nseb-like-btnと同じpostLike()を使い、
+      // クリックで直接スキの追加/解除ができる<button>に変更した。カード全体が
+      // 記事詳細への<a>リンクで包まれているため、クリック時は必ず
+      // preventDefault/stopPropagationで画面遷移を止める。
+      var likeBadge = document.createElement('button');
+      likeBadge.type = 'button';
       likeBadge.className = 'nseb-card-badge nseb-card-like' + (liked ? ' is-liked' : '');
       likeBadge.textContent = (liked ? '♥' : '♡') + fmt(d.like_count);
+      likeBadge.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        var prevLiked = isLiked(numericId);
+        var nextLiked = !prevLiked;
+        var prevCount = parseCountText(likeBadge.textContent);
+        var optimisticCount = nextLiked ? prevCount + 1 : Math.max(0, prevCount - 1);
+
+        // 楽観的更新：サーバー応答を待たず、ハートとカウントを即座に
+        // 一体で書き換える（詳細ページのクリックハンドラと同じ方式）。
+        setLiked(numericId, nextLiked);
+        likeBadge.classList.toggle('is-liked', nextLiked);
+        likeBadge.textContent = (nextLiked ? '♥' : '♡') + fmt(optimisticCount);
+
+        postLike(numericId, nextLiked).then(function (result) {
+          if (result.ok) {
+            var confirmedLiked = effectiveLiked(numericId, result.data.count);
+            likeBadge.classList.toggle('is-liked', confirmedLiked);
+            likeBadge.textContent = (confirmedLiked ? '♥' : '♡') + fmt(result.data.count);
+            if (nextLiked && result.data.count <= 0) {
+              purgeStaleLikes([numericId]);
+            }
+            return;
+          }
+          if (result.confirmed) {
+            // サーバーが明確に失敗応答を返した場合のみロールバックする
+            // （postLikeのコメント参照。fetch自体の例外ではロールバックしない）。
+            setLiked(numericId, prevLiked);
+            likeBadge.classList.toggle('is-liked', prevLiked);
+            likeBadge.textContent = (prevLiked ? '♥' : '♡') + fmt(prevCount);
+          }
+        });
+      });
       wrap.appendChild(likeBadge);
     });
     purgeStaleLikes(staleIds);
