@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Junchan World Site Branding
  * Description: ヘッダーロゴ（サイトタイトル）に丸型プロフィール写真とタグラインを統合し、グローバルナビの「準備中」項目にツールチップ・クリック無効化を付与する。
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: junchan-world
  */
 
@@ -159,44 +159,6 @@ class Junchan_Site_Branding {
   color: #c0392b;
 }
 
-/* サイドバーX(Twitter)検索ウィジェット */
-.jw-x-search-widget .jw-x-search-title {
-  font-weight: bold;
-  display: block;
-  margin-bottom: 0.6em;
-}
-.jw-x-search-widget input[type="text"],
-.jw-x-search-widget input[type="date"] {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 6px 8px;
-  margin-bottom: 0.5em;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  font-size: 0.9em;
-}
-.jw-x-search-widget .jw-x-search-dates {
-  display: flex;
-  gap: 8px;
-}
-.jw-x-search-widget .jw-x-search-dates label {
-  flex: 1;
-  font-size: 0.78em;
-  color: #666;
-}
-.jw-x-search-widget button {
-  width: 100%;
-  padding: 8px;
-  background: #000;
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: bold;
-}
-.jw-x-search-widget button:hover {
-  background: #333;
-}
 </style>
         <?php
     }
@@ -432,30 +394,6 @@ class Junchan_Site_Branding {
     }
   }
 
-  // TweetTVJP専用のX(Twitter)検索フォーム。サイト内でのプロキシ描画は行わず、
-  // 生成したクエリでx.com/searchを新規タブとして開くだけの単純な導線。
-  function wireXSearchWidget() {
-    var btn = document.getElementById('jw-x-search-submit');
-    if (!btn || btn.dataset.jwBound) { return; }
-    btn.dataset.jwBound = '1';
-    btn.addEventListener('click', function () {
-      var kwEl = document.getElementById('jw-x-search-keyword');
-      var sinceEl = document.getElementById('jw-x-search-since');
-      var untilEl = document.getElementById('jw-x-search-until');
-      var kw = kwEl ? kwEl.value.trim() : '';
-      var since = sinceEl ? sinceEl.value : '';
-      var until = untilEl ? untilEl.value : '';
-
-      var parts = ['from:@TweetTVJP'];
-      if (kw) { parts.push(kw); }
-      if (since) { parts.push('since:' + since); }
-      if (until) { parts.push('until:' + until); }
-
-      var url = 'https://x.com/search?q=' + encodeURIComponent(parts.join(' ')) + '&f=live';
-      window.open(url, '_blank', 'noopener');
-    });
-  }
-
   function refreshAll() {
     insertHeaderPhoto();
     markComingSoonLinks();
@@ -463,7 +401,6 @@ class Junchan_Site_Branding {
     setupAccordionWidgets('最近のコメント', { incremental: true, step: 5 });
     setupAccordionWidgets('カテゴリ', { incremental: false });
     setupArchiveAccordion();
-    wireXSearchWidget();
   }
 
   ready(refreshAll);
