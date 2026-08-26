@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Junchan World Site Branding
  * Description: ヘッダーロゴ（サイトタイトル）に丸型プロフィール写真とタグラインを統合し、グローバルナビの「準備中」項目にツールチップ・クリック無効化を付与する。
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: junchan-world
  */
 
@@ -44,13 +44,13 @@ class Junchan_Site_Branding {
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
   background: #fff;
 }
-#header-in h1.logo.logo-header {
+#header-in .logo.logo-header {
   grid-row: 1;
   grid-column: 2;
   margin: 0;
   text-align: left;
 }
-#header-in h1.logo.logo-header .site-name-text {
+#header-in .logo.logo-header .site-name-text {
   font-size: 2em !important;
   font-weight: 700 !important;
   letter-spacing: 0.06em;
@@ -75,7 +75,7 @@ class Junchan_Site_Branding {
   #header-in {
     column-gap: 10px;
   }
-  #header-in h1.logo.logo-header .site-name-text {
+  #header-in .logo.logo-header .site-name-text {
     font-size: 1.3em !important;
     letter-spacing: 0.03em;
   }
@@ -93,32 +93,53 @@ class Junchan_Site_Branding {
   opacity: 0.6;
 }
 
-/* サイドバーウィジェットのアコーディオン開閉UI */
+/* 記事カード：抜粋文が長い場合に下部の日付・価格メタ情報と重なる不具合の修正。
+   Cocoon純正の-webkit-line-clamp指定はdisplay:-webkit-boxが無いと機能しないため、
+   ここで明示的に有効化して抜粋文の高さを確実にクランプする。 */
+.entry-card-snippet {
+  display: -webkit-box !important;
+  -webkit-box-orient: vertical !important;
+  overflow: hidden !important;
+}
+.entry-card-content {
+  padding-bottom: 2.6em !important;
+}
+
+/* サイドバーウィジェットのアコーディオン開閉UI（↓・↑・×） */
 .widget h2.wp-block-heading.jw-widget-toggle {
-  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  user-select: none;
 }
-.jw-toggle-icon {
-  font-size: 0.7em;
-  color: #999;
+.jw-toggle-icons {
+  display: inline-flex;
+  gap: 6px;
   margin-left: 8px;
   flex-shrink: 0;
+}
+.jw-toggle-icon {
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.8em;
+  line-height: 1;
+  color: #666;
+  background: #eee;
+  border-radius: 4px;
+  padding: 3px 7px;
+}
+.jw-toggle-icon:hover {
+  background: #ddd;
 }
 .jw-archive-groups {
   font-size: 0.92em;
 }
 .jw-archive-group-header {
-  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 8px 4px;
   border-bottom: 1px solid #eee;
   font-weight: bold;
-  user-select: none;
 }
 .jw-archive-group-header:first-child {
   border-top: 1px solid #eee;
@@ -132,6 +153,49 @@ class Junchan_Site_Branding {
 .jw-archive-group-list li {
   padding: 3px 0;
   font-size: 0.94em;
+}
+.jw-archive-group-list a.jw-archive-current {
+  font-weight: bold;
+  color: #c0392b;
+}
+
+/* サイドバーX(Twitter)検索ウィジェット */
+.jw-x-search-widget .jw-x-search-title {
+  font-weight: bold;
+  display: block;
+  margin-bottom: 0.6em;
+}
+.jw-x-search-widget input[type="text"],
+.jw-x-search-widget input[type="date"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  margin-bottom: 0.5em;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+.jw-x-search-widget .jw-x-search-dates {
+  display: flex;
+  gap: 8px;
+}
+.jw-x-search-widget .jw-x-search-dates label {
+  flex: 1;
+  font-size: 0.78em;
+  color: #666;
+}
+.jw-x-search-widget button {
+  width: 100%;
+  padding: 8px;
+  background: #000;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+}
+.jw-x-search-widget button:hover {
+  background: #333;
 }
 </style>
         <?php
@@ -178,15 +242,86 @@ class Junchan_Site_Branding {
     }
   }
 
-  function makeToggleIcon() {
-    var icon = document.createElement('span');
-    icon.className = 'jw-toggle-icon';
-    icon.textContent = '▼';
-    return icon;
+  function makeIconBtn(symbol, cls) {
+    var el = document.createElement('span');
+    el.className = 'jw-toggle-icon ' + cls;
+    el.textContent = symbol;
+    return el;
   }
 
-  // 「最近の記事」「最近のコメント」（5件ずつ増える）・「カテゴリ」（全件一括）
-  // 共通のサイドバーウィジェット開閉ロジック。
+  // 単純開閉（↓で開く／×で全閉じる）。「カテゴリ」「アーカイブ」の
+  // 各階層（ウィジェット全体・年区切りの親ブロック）で共用する。
+  function attachSimpleToggle(heading, content, opts) {
+    opts = opts || {};
+    var iconWrap = document.createElement('span');
+    iconWrap.className = 'jw-toggle-icons';
+    var downBtn = makeIconBtn('↓', 'jw-icon-down');
+    var closeBtn = makeIconBtn('×', 'jw-icon-close');
+    iconWrap.appendChild(downBtn);
+    iconWrap.appendChild(closeBtn);
+    heading.appendChild(iconWrap);
+
+    var open = !!opts.startOpen;
+    function render() {
+      content.style.display = open ? '' : 'none';
+      downBtn.style.display = open ? 'none' : '';
+      closeBtn.style.display = open ? '' : 'none';
+    }
+    function setOpen(v) { open = v; render(); }
+    downBtn.addEventListener('click', function (e) { e.stopPropagation(); setOpen(true); });
+    closeBtn.addEventListener('click', function (e) { e.stopPropagation(); setOpen(false); });
+    render();
+    return { setOpen: setOpen, isOpen: function () { return open; } };
+  }
+
+  // 段階開閉（↓で5件ずつ増える／↑で5件減らす／×で全閉じる）。
+  // 「最近の記事」「最近のコメント」用。
+  function attachSteppedToggle(heading, content, step) {
+    var iconWrap = document.createElement('span');
+    iconWrap.className = 'jw-toggle-icons';
+    var downBtn = makeIconBtn('↓', 'jw-icon-down');
+    var upBtn = makeIconBtn('↑', 'jw-icon-up');
+    var closeBtn = makeIconBtn('×', 'jw-icon-close');
+    iconWrap.appendChild(downBtn);
+    iconWrap.appendChild(upBtn);
+    iconWrap.appendChild(closeBtn);
+    heading.appendChild(iconWrap);
+
+    var items = (content.tagName === 'UL') ? Array.prototype.slice.call(content.children) : null;
+    var total = items ? items.length : 0;
+    var shown = 0;
+
+    function render() {
+      if (items && total > 0) {
+        for (var i = 0; i < items.length; i++) {
+          items[i].style.display = (i < shown) ? '' : 'none';
+        }
+      }
+      content.style.display = shown > 0 ? '' : 'none';
+      downBtn.style.display = (shown < total) ? '' : 'none';
+      upBtn.style.display = (shown > 0) ? '' : 'none';
+      closeBtn.style.display = (shown > 0) ? '' : 'none';
+    }
+    downBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      shown = Math.min(shown + step, total);
+      render();
+    });
+    upBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      shown = Math.max(shown - step, 0);
+      render();
+    });
+    closeBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      shown = 0;
+      render();
+    });
+    render();
+  }
+
+  // 「最近の記事」「最近のコメント」（段階開閉）・「カテゴリ」（単純開閉）
+  // 共通のサイドバーウィジェット検出ロジック。
   function setupAccordionWidgets(headingText, opts) {
     opts = opts || {};
     var incremental = !!opts.incremental;
@@ -200,44 +335,20 @@ class Junchan_Site_Branding {
       var content = heading.nextElementSibling;
       if (!content) { continue; }
       heading.dataset.jwAccordionBound = '1';
-
       heading.classList.add('jw-widget-toggle');
-      heading.appendChild(makeToggleIcon());
-      var icon = heading.querySelector('.jw-toggle-icon');
+      content.style.display = 'none';
 
-      var items = (content.tagName === 'UL') ? Array.prototype.slice.call(content.children) : null;
-      var total = items ? items.length : 0;
-      var shown = 0;
-
-      (function (content, items, total, icon, incremental, step) {
-        function render() {
-          if (incremental && items && total > 0) {
-            for (var i = 0; i < items.length; i++) {
-              items[i].style.display = (i < shown) ? '' : 'none';
-            }
-            content.style.display = shown > 0 ? '' : 'none';
-            icon.textContent = (shown >= total) ? '▲' : '▼';
-          } else {
-            content.style.display = shown > 0 ? '' : 'none';
-            icon.textContent = shown > 0 ? '▲' : '▼';
-          }
-        }
-        function onToggle() {
-          if (incremental && items && total > 0) {
-            shown = (shown >= total) ? 0 : Math.min(shown + step, total);
-          } else {
-            shown = shown > 0 ? 0 : 1;
-          }
-          render();
-        }
-        heading.addEventListener('click', onToggle);
-        content.style.display = 'none';
-        render();
-      })(content, items, total, icon, incremental, step);
+      if (incremental) {
+        attachSteppedToggle(heading, content, step);
+      } else {
+        attachSimpleToggle(heading, content, {});
+      }
     }
   }
 
-  // 「アーカイブ」：既存の月別 <li> を5年区切りの2段アコーディオンに再構築する。
+  // 「アーカイブ」：既存の月別 <li> を2年区切りの2段アコーディオンに再構築する。
+  // 現在閲覧中の月別アーカイブページに該当する場合は、該当する年区分と
+  // ウィジェット全体を自動的に開いた状態で表示する。
   function setupArchiveAccordion() {
     var headings = document.querySelectorAll('.widget h2.wp-block-heading');
     for (var h = 0; h < headings.length; h++) {
@@ -247,6 +358,7 @@ class Junchan_Site_Branding {
       var content = heading.nextElementSibling;
       if (!content || content.tagName !== 'UL') { continue; }
       heading.dataset.jwArchiveBound = '1';
+      heading.classList.add('jw-widget-toggle');
 
       var links = Array.prototype.slice.call(content.querySelectorAll(':scope > li > a'));
       var months = [];
@@ -263,78 +375,85 @@ class Junchan_Site_Branding {
       }
       if (!months.length) { continue; }
 
-      function toNum(mo) { return mo.year * 12 + mo.month; }
-      function fromNum(n) {
-        var y = Math.floor((n - 1) / 12);
-        var mm = ((n - 1) % 12) + 1;
-        return { year: y, month: mm };
-      }
+      var curMatch = window.location.pathname.match(/\/(\d{4})\/(\d{2})\//);
+      var curYear = curMatch ? parseInt(curMatch[1], 10) : null;
+      var curMonth = curMatch ? parseInt(curMatch[2], 10) : null;
 
-      var newest = months[0];
-      var oldest = months[months.length - 1];
-      var newestNum = toNum(newest);
-
-      var boundaries = [{ year: oldest.year, month: oldest.month }];
-      var curNum = toNum(oldest);
-      while (curNum + 60 <= newestNum) {
-        curNum += 60;
-        boundaries.push(fromNum(curNum));
-      }
-      var lastB = boundaries[boundaries.length - 1];
-      if (!(lastB.year === newest.year && lastB.month === newest.month)) {
-        boundaries.push({ year: newest.year, month: newest.month });
-      }
+      var newestYear = months[0].year;
+      var oldestYear = months[months.length - 1].year;
 
       var groups = [];
-      for (var b = 0; b < boundaries.length; b++) {
-        var startNum = toNum(boundaries[b]);
-        var endNum = (b + 1 < boundaries.length) ? (toNum(boundaries[b + 1]) - 1) : newestNum;
+      for (var y = newestYear; y >= oldestYear; y -= 2) {
+        var loY = y - 1;
         var groupMonths = months.filter(function (mo) {
-          var n = toNum(mo);
-          return n >= startNum && n <= endNum;
+          return mo.year === y || mo.year === loY;
         });
         if (groupMonths.length) {
-          groups.push({ label: boundaries[b].year + '年' + boundaries[b].month + '月', months: groupMonths });
+          groups.push({ label: y + '年〜' + loY + '年', hiY: y, loY: loY, months: groupMonths });
         }
       }
-      groups.reverse();
 
-      var wrapper = document.createElement('div');
-      wrapper.className = 'jw-archive-groups';
+      var outerWrap = document.createElement('div');
+      outerWrap.className = 'jw-archive-groups';
+      var anyGroupOpen = false;
+
       groups.forEach(function (g) {
         var groupHeader = document.createElement('div');
         groupHeader.className = 'jw-archive-group-header';
         var labelSpan = document.createElement('span');
         labelSpan.textContent = g.label;
         groupHeader.appendChild(labelSpan);
-        groupHeader.appendChild(makeToggleIcon());
-        var groupIcon = groupHeader.querySelector('.jw-toggle-icon');
 
         var groupList = document.createElement('ul');
         groupList.className = 'jw-archive-group-list';
-        groupList.style.display = 'none';
         g.months.forEach(function (mo) {
           var li = document.createElement('li');
           var a = document.createElement('a');
           a.href = mo.href;
           a.textContent = mo.label;
+          if (curYear !== null && mo.year === curYear && mo.month === curMonth) {
+            a.classList.add('jw-archive-current');
+          }
           li.appendChild(a);
           groupList.appendChild(li);
         });
 
-        groupHeader.addEventListener('click', function () {
-          var isOpen = groupList.style.display !== 'none';
-          groupList.style.display = isOpen ? 'none' : '';
-          groupIcon.textContent = isOpen ? '▼' : '▲';
-        });
+        var isCurrentGroup = curYear !== null && curYear <= g.hiY && curYear >= g.loY;
+        if (isCurrentGroup) { anyGroupOpen = true; }
+        attachSimpleToggle(groupHeader, groupList, { startOpen: isCurrentGroup });
 
-        wrapper.appendChild(groupHeader);
-        wrapper.appendChild(groupList);
+        outerWrap.appendChild(groupHeader);
+        outerWrap.appendChild(groupList);
       });
 
-      content.parentNode.insertBefore(wrapper, content);
+      content.parentNode.insertBefore(outerWrap, content);
       content.style.display = 'none';
+      attachSimpleToggle(heading, outerWrap, { startOpen: anyGroupOpen });
     }
+  }
+
+  // TweetTVJP専用のX(Twitter)検索フォーム。サイト内でのプロキシ描画は行わず、
+  // 生成したクエリでx.com/searchを新規タブとして開くだけの単純な導線。
+  function wireXSearchWidget() {
+    var btn = document.getElementById('jw-x-search-submit');
+    if (!btn || btn.dataset.jwBound) { return; }
+    btn.dataset.jwBound = '1';
+    btn.addEventListener('click', function () {
+      var kwEl = document.getElementById('jw-x-search-keyword');
+      var sinceEl = document.getElementById('jw-x-search-since');
+      var untilEl = document.getElementById('jw-x-search-until');
+      var kw = kwEl ? kwEl.value.trim() : '';
+      var since = sinceEl ? sinceEl.value : '';
+      var until = untilEl ? untilEl.value : '';
+
+      var parts = ['from:@TweetTVJP'];
+      if (kw) { parts.push(kw); }
+      if (since) { parts.push('since:' + since); }
+      if (until) { parts.push('until:' + until); }
+
+      var url = 'https://x.com/search?q=' + encodeURIComponent(parts.join(' ')) + '&f=live';
+      window.open(url, '_blank', 'noopener');
+    });
   }
 
   function refreshAll() {
@@ -344,6 +463,7 @@ class Junchan_Site_Branding {
     setupAccordionWidgets('最近のコメント', { incremental: true, step: 5 });
     setupAccordionWidgets('カテゴリ', { incremental: false });
     setupArchiveAccordion();
+    wireXSearchWidget();
   }
 
   ready(refreshAll);
