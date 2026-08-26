@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 3.2.0
+ * Version: 3.3.0
  * Author: junchan-world
  */
 
@@ -1267,56 +1267,74 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     purgeStaleLikes(staleIds);
   }
 
-  // 【2026-08-28追記：サイドバー検索欄の「購入済み」「スキ」絞り込み】
-  // サーバー側は購入・スキ状態を一切知らない（LocalStorageのみに存在する
-  // データのため）ので、これはサーバーへの再検索ではなく、今表示されている
-  // 一覧のarticle要素をクライアント側で即座に表示/非表示するだけの機能にする。
-  // 判定は、独自にLocalStorageを読み直すのではなく、renderCardBadgesが
-  // 既に描画済みの各カードのバッジのクラス（.is-purchased/.is-readfree/
-  // .is-liked）をそのまま見る。これによりcomputeAccessBadgeState等の
-  // 判定ロジックと必ず一致し、二重実装によるズレが起きない。
-  // チェックボックス自体は検索フォームウィジェット（custom_html-3、
-  // このリポジトリには無い）側の静的HTMLとして追加済みで、name属性を
-  // 持たないため既存のfilter_cats[]送信・同期処理には一切干渉しない。
+  // 【2026-08-28追記、2026-08-30に責務分離してリファクタリング：
+  // サイドバー検索欄の「購入済み」「スキ」絞り込み】
   //
-  // 【2026-08-29修正】「購入済み」フィルターに、サブスク加入による読み放題
-  // 対象（.is-readfree）まで含まれてしまっていた不具合を修正。「購入済み」は
-  // 単体購入（買い切り）の履歴が実際にある記事（.is-purchased）だけを対象と
-  // し、.is-readfreeは対象外にする（サブスク加入者であっても、その記事を
-  // 個別購入していなければ「購入済み」検索には出さない）。
-  function applyMetaFilters() {
-    var purchasedCb = document.getElementById('nseb-filter-purchased');
-    var likedCb = document.getElementById('nseb-filter-liked');
-    if (!purchasedCb && !likedCb) { return; }
-    var wantPurchased = !!(purchasedCb && purchasedCb.checked);
-    var wantLiked = !!(likedCb && likedCb.checked);
-
+  // ここは完全にクライアント側限定の機能であり、サーバー（WP_Query・
+  // ページネーション）の責務には一切踏み込まない、という原則を徹底する：
+  //   ・サーバー側（custom-search-filter.php）は s/filter_cats[]/paged による
+  //     WP_Queryとpaginate_links()の生成だけを担当し、購入済み/スキの状態は
+  //     一切関知しない（関知させない）。
+  //   ・ここ（JS）は、サーバーが返したDOMに対して「表示/非表示」の見た目だけを
+  //     後から重ねる。判定は独自にLocalStorageを読み直すのではなく、
+  //     renderCardBadgesが既に描画済みの各カードのバッジのクラス
+  //     （.is-purchased/.is-readfree/.is-liked）をそのまま見る
+  //     （computeAccessBadgeState等の判定ロジックと必ず一致させ、
+  //     二重実装によるズレを防ぐ）。
+  //   ・「購入済み」は単体購入（買い切り）の履歴が実際にある記事
+  //     （.is-purchased）だけを対象とし、サブスク読み放題（.is-readfree）は
+  //     対象外にする（2026-08-29修正）。
+  //
+  // 【2026-08-30追記：重大回帰の原因究明と再発防止】「note」のみのカテゴリー
+  // 絞り込み検索でページネーションが消える、という報告を受けて実機で
+  // 検証したところ、以下が判明した：
+  //   1) サーバー側のページネーションリンク生成・検索条件保持は正常だった
+  //      （クリーンなブラウザでの実機検証で確認済み。s/filter_cats[]/
+  //      filter_submittedを保持したまま複数ページを正しく遷移できる）。
+  //   2) 真因は、購入済み/スキの一時フィルター（nsebMetaFiltersV1）が
+  //      LocalStorageに「以前チェックしたまま」残っていたケースで、
+  //      これはページネーションをまたいだ持ち込みを意図した仕様通りの
+  //      永続化だが、その後まったく無関係な新しい検索をした際にも
+  //      古いチェック状態を引きずってしまい、下のページネーション非表示
+  //      ロジックが誤発火していた。
+  // 対策として、検索フォームウィジェット（custom_html-3）側に
+  // 「フォームを実際に送信（新規検索）したら一時フィルターをリセットする」
+  // 処理を追加し、加えてここでは以下2点を厳格化する：
+  //   ・ページネーション要素の検索範囲を、一覧コンテナ（#list/.list）の
+  //     直近の親要素の中だけに限定する（documentワイド検索をやめ、
+  //     万一将来他のUIが同名クラスを使っても干渉しないようにする）。
+  //   ・wantPurchased/wantLikedが両方falseの場合、記事の表示状態を
+  //     リセットするだけで、それ以外のDOM（notice/ページネーション）には
+  //     一切触れない経路を明示的に分離する。
+  function filterArticlesByMetaState(wantPurchased, wantLiked) {
     var articles = document.querySelectorAll('article[id^="post-"]');
     var anyVisible = false;
     articles.forEach(function (art) {
+      var show;
       if (!wantPurchased && !wantLiked) {
-        art.style.display = '';
-        anyVisible = true;
-        return;
+        show = true;
+      } else {
+        var matchesPurchased = wantPurchased && !!art.querySelector('.nseb-card-purchased.is-purchased');
+        var matchesLiked = wantLiked && !!art.querySelector('.nseb-card-like.is-liked');
+        show = matchesPurchased || matchesLiked;
       }
-      var matchesPurchased = wantPurchased && !!art.querySelector('.nseb-card-purchased.is-purchased');
-      var matchesLiked = wantLiked && !!art.querySelector('.nseb-card-like.is-liked');
-      var show = matchesPurchased || matchesLiked;
       art.style.display = show ? '' : 'none';
       if (show) { anyVisible = true; }
     });
+    return { articles: articles, anyVisible: anyVisible };
+  }
 
-    // 【2026-08-29追記：クライアント側限定の絞り込みの限界を補う案内】
-    // 購入済み/スキ絞り込みはサーバー側のページネーションとは無関係に、
-    // 今表示中のページ内だけでshow/hideしているため、「このページには
-    // 該当記事が無い（他のページにはあるかもしれない）」という状態が起こり
-    // うる。何も表示されない空白画面のまま放置すると壊れて見えるため、
-    // その場合のみ案内文を出す（articleの増減はしないため既存レイアウトは
-    // 壊さない）。
+  // クライアント側限定の絞り込みは、サーバー側のページネーションとは無関係に
+  // 今表示中のページ内だけでshow/hideするため、「このページには該当記事が
+  // 無い（他のページにはあるかもしれない）」という状態が起こりうる。空白の
+  // まま放置すると壊れて見えるため、フィルターが有効かつ1件も一致しない
+  // 場合のみ案内文を出す（article自体の増減はしないため既存レイアウトは
+  // 壊さない）。
+  function updateEmptyResultsNotice(articles, isFilterActive, anyVisible) {
     var noticeId = 'nseb-meta-filter-empty-notice';
     var existingNotice = document.getElementById(noticeId);
     var listContainer = articles.length ? articles[0].closest('#list, .list') : null;
-    if ((wantPurchased || wantLiked) && !anyVisible && listContainer) {
+    if (isFilterActive && !anyVisible && listContainer) {
       if (!existingNotice) {
         var notice = document.createElement('p');
         notice.id = noticeId;
@@ -1327,18 +1345,37 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     } else if (existingNotice) {
       existingNotice.remove();
     }
+  }
 
-    // 【2026-08-29追記：フィルター適用中はページネーションを非表示にする】
-    // 購入済み/スキ絞り込みはクライアント側限定で、サーバー側の全件数に
-    // 基づくページネーション（「全35ページ」等）とは対応関係が無い。
-    // 絞り込み中にこれを表示したままだと、2ページ目以降に遷移した読者が
-    // 「該当記事なし」の空ページに迷い込む（上のnoticeで案内はしているが、
-    // それ以前にページ送りへ誘導すること自体を避けたい）。フィルターが
-    // 1つでも有効な間はページネーションのラッパー要素ごと非表示にし、
-    // 全て解除されたら通常表示に戻す。
-    document.querySelectorAll('.pagination, .pagination-next, .pagination-prev').forEach(function (el) {
-      el.style.display = (wantPurchased || wantLiked) ? 'none' : '';
+  // 購入済み/スキ絞り込みはクライアント側限定で、サーバー側の全件数に基づく
+  // ページネーション（「全35ページ」等）とは対応関係が無い。絞り込み中に
+  // これを表示したままだと、2ページ目以降に遷移した読者が「該当記事なし」の
+  // 空ページに迷い込む（上のnoticeで案内はしているが、それ以前にページ送りへ
+  // 誘導すること自体を避けたい）。フィルターが1つでも有効な間はページ
+  // ネーションのラッパー要素ごと非表示にし、両方解除されたら通常表示に戻す。
+  // 【スコープを厳格化】documentワイドではなく、一覧コンテナ（#list/.list）の
+  // 直近の親要素の中だけを対象にする。通常の検索・カテゴリ絞り込み時は
+  // isFilterActive===falseでこの関数が呼ばれ、単に通常表示へリセットする
+  // だけで他には一切干渉しない。
+  function updatePaginationVisibility(articles, isFilterActive) {
+    var listContainer = articles.length ? articles[0].closest('#list, .list') : null;
+    var scopeRoot = (listContainer && listContainer.parentElement) ? listContainer.parentElement : document;
+    scopeRoot.querySelectorAll('.pagination, .pagination-next, .pagination-prev').forEach(function (el) {
+      el.style.display = isFilterActive ? 'none' : '';
     });
+  }
+
+  function applyMetaFilters() {
+    var purchasedCb = document.getElementById('nseb-filter-purchased');
+    var likedCb = document.getElementById('nseb-filter-liked');
+    if (!purchasedCb && !likedCb) { return; }
+    var wantPurchased = !!(purchasedCb && purchasedCb.checked);
+    var wantLiked = !!(likedCb && likedCb.checked);
+    var isFilterActive = wantPurchased || wantLiked;
+
+    var result = filterArticlesByMetaState(wantPurchased, wantLiked);
+    updateEmptyResultsNotice(result.articles, isFilterActive, result.anyVisible);
+    updatePaginationVisibility(result.articles, isFilterActive);
   }
 
   // pageshowでの再実行時にリスナーが二重登録されないよう、bound済み
