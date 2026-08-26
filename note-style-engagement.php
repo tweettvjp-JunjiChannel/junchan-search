@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 3.3.0
+ * Version: 4.0.0
  * Author: junchan-world
  */
 
@@ -1267,128 +1267,25 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     purgeStaleLikes(staleIds);
   }
 
-  // 【2026-08-28追記、2026-08-30に責務分離してリファクタリング：
-  // サイドバー検索欄の「購入済み」「スキ」絞り込み】
-  //
-  // ここは完全にクライアント側限定の機能であり、サーバー（WP_Query・
-  // ページネーション）の責務には一切踏み込まない、という原則を徹底する：
-  //   ・サーバー側（custom-search-filter.php）は s/filter_cats[]/paged による
-  //     WP_Queryとpaginate_links()の生成だけを担当し、購入済み/スキの状態は
-  //     一切関知しない（関知させない）。
-  //   ・ここ（JS）は、サーバーが返したDOMに対して「表示/非表示」の見た目だけを
-  //     後から重ねる。判定は独自にLocalStorageを読み直すのではなく、
-  //     renderCardBadgesが既に描画済みの各カードのバッジのクラス
-  //     （.is-purchased/.is-readfree/.is-liked）をそのまま見る
-  //     （computeAccessBadgeState等の判定ロジックと必ず一致させ、
-  //     二重実装によるズレを防ぐ）。
-  //   ・「購入済み」は単体購入（買い切り）の履歴が実際にある記事
-  //     （.is-purchased）だけを対象とし、サブスク読み放題（.is-readfree）は
-  //     対象外にする（2026-08-29修正）。
-  //
-  // 【2026-08-30追記：重大回帰の原因究明と再発防止】「note」のみのカテゴリー
-  // 絞り込み検索でページネーションが消える、という報告を受けて実機で
-  // 検証したところ、以下が判明した：
-  //   1) サーバー側のページネーションリンク生成・検索条件保持は正常だった
-  //      （クリーンなブラウザでの実機検証で確認済み。s/filter_cats[]/
-  //      filter_submittedを保持したまま複数ページを正しく遷移できる）。
-  //   2) 真因は、購入済み/スキの一時フィルター（nsebMetaFiltersV1）が
-  //      LocalStorageに「以前チェックしたまま」残っていたケースで、
-  //      これはページネーションをまたいだ持ち込みを意図した仕様通りの
-  //      永続化だが、その後まったく無関係な新しい検索をした際にも
-  //      古いチェック状態を引きずってしまい、下のページネーション非表示
-  //      ロジックが誤発火していた。
-  // 対策として、検索フォームウィジェット（custom_html-3）側に
-  // 「フォームを実際に送信（新規検索）したら一時フィルターをリセットする」
-  // 処理を追加し、加えてここでは以下2点を厳格化する：
-  //   ・ページネーション要素の検索範囲を、一覧コンテナ（#list/.list）の
-  //     直近の親要素の中だけに限定する（documentワイド検索をやめ、
-  //     万一将来他のUIが同名クラスを使っても干渉しないようにする）。
-  //   ・wantPurchased/wantLikedが両方falseの場合、記事の表示状態を
-  //     リセットするだけで、それ以外のDOM（notice/ページネーション）には
-  //     一切触れない経路を明示的に分離する。
-  function filterArticlesByMetaState(wantPurchased, wantLiked) {
-    var articles = document.querySelectorAll('article[id^="post-"]');
-    var anyVisible = false;
-    articles.forEach(function (art) {
-      var show;
-      if (!wantPurchased && !wantLiked) {
-        show = true;
-      } else {
-        var matchesPurchased = wantPurchased && !!art.querySelector('.nseb-card-purchased.is-purchased');
-        var matchesLiked = wantLiked && !!art.querySelector('.nseb-card-like.is-liked');
-        show = matchesPurchased || matchesLiked;
-      }
-      art.style.display = show ? '' : 'none';
-      if (show) { anyVisible = true; }
-    });
-    return { articles: articles, anyVisible: anyVisible };
-  }
-
-  // クライアント側限定の絞り込みは、サーバー側のページネーションとは無関係に
-  // 今表示中のページ内だけでshow/hideするため、「このページには該当記事が
-  // 無い（他のページにはあるかもしれない）」という状態が起こりうる。空白の
-  // まま放置すると壊れて見えるため、フィルターが有効かつ1件も一致しない
-  // 場合のみ案内文を出す（article自体の増減はしないため既存レイアウトは
-  // 壊さない）。
-  function updateEmptyResultsNotice(articles, isFilterActive, anyVisible) {
-    var noticeId = 'nseb-meta-filter-empty-notice';
-    var existingNotice = document.getElementById(noticeId);
-    var listContainer = articles.length ? articles[0].closest('#list, .list') : null;
-    if (isFilterActive && !anyVisible && listContainer) {
-      if (!existingNotice) {
-        var notice = document.createElement('p');
-        notice.id = noticeId;
-        notice.style.cssText = 'padding:1.2em;text-align:center;color:#777;';
-        notice.textContent = 'このページには絞り込み条件に一致する記事がありません。他のページもご確認ください。';
-        listContainer.insertBefore(notice, listContainer.firstChild);
-      }
-    } else if (existingNotice) {
-      existingNotice.remove();
-    }
-  }
-
-  // 購入済み/スキ絞り込みはクライアント側限定で、サーバー側の全件数に基づく
-  // ページネーション（「全35ページ」等）とは対応関係が無い。絞り込み中に
-  // これを表示したままだと、2ページ目以降に遷移した読者が「該当記事なし」の
-  // 空ページに迷い込む（上のnoticeで案内はしているが、それ以前にページ送りへ
-  // 誘導すること自体を避けたい）。フィルターが1つでも有効な間はページ
-  // ネーションのラッパー要素ごと非表示にし、両方解除されたら通常表示に戻す。
-  // 【スコープを厳格化】documentワイドではなく、一覧コンテナ（#list/.list）の
-  // 直近の親要素の中だけを対象にする。通常の検索・カテゴリ絞り込み時は
-  // isFilterActive===falseでこの関数が呼ばれ、単に通常表示へリセットする
-  // だけで他には一切干渉しない。
-  function updatePaginationVisibility(articles, isFilterActive) {
-    var listContainer = articles.length ? articles[0].closest('#list, .list') : null;
-    var scopeRoot = (listContainer && listContainer.parentElement) ? listContainer.parentElement : document;
-    scopeRoot.querySelectorAll('.pagination, .pagination-next, .pagination-prev').forEach(function (el) {
-      el.style.display = isFilterActive ? 'none' : '';
-    });
-  }
-
-  function applyMetaFilters() {
-    var purchasedCb = document.getElementById('nseb-filter-purchased');
-    var likedCb = document.getElementById('nseb-filter-liked');
-    if (!purchasedCb && !likedCb) { return; }
-    var wantPurchased = !!(purchasedCb && purchasedCb.checked);
-    var wantLiked = !!(likedCb && likedCb.checked);
-    var isFilterActive = wantPurchased || wantLiked;
-
-    var result = filterArticlesByMetaState(wantPurchased, wantLiked);
-    updateEmptyResultsNotice(result.articles, isFilterActive, result.anyVisible);
-    updatePaginationVisibility(result.articles, isFilterActive);
-  }
-
-  // pageshowでの再実行時にリスナーが二重登録されないよう、bound済み
-  // フラグで一度だけ登録する（他のクリックリスナーと同じ方式）。
-  function bindMetaFilterCheckboxes() {
-    ['nseb-filter-purchased', 'nseb-filter-liked'].forEach(function (id) {
-      var cb = document.getElementById(id);
-      if (cb && !cb.dataset.nsebBound) {
-        cb.dataset.nsebBound = '1';
-        cb.addEventListener('change', applyMetaFilters);
-      }
-    });
-  }
+  // 【2026-09-01追記：クライアント側の間引き実装を完全撤廃】「購入済み」
+  // 「スキ」絞り込みは以前、サーバーが返した1ページ10件の中からJS側で
+  // 対象外を非表示にするだけの実装（クライアント側の間引き）だった。
+  // これでは1ページ目に該当記事が数件しか無ければそれ以外の過去記事を
+  // 一切抽出できず、ページネーションも実件数と対応しない不整合な見た目に
+  // なる（さらにその手前で「LocalStorageの残存フラグが無関係な検索の
+  // ページネーション表示まで壊す」という重大回帰も引き起こした）。
+  // 根本対策として、この絞り込みは検索フォームウィジェット
+  // （custom_html-3）とサーバー側（custom-search-filter.phpの
+  // filter_search_query、post__in）による正規のWP_Queryへ完全移行した。
+  // フォーム送信時にLocalStorageの記事ID一覧をliked_ids[]/purchased_ids[]
+  // としてサーバーへ渡し、WordPress自身に全期間から該当記事だけを正しく
+  // 抽出させ、10件ごとの正規のページネーションを自動生成させる。
+  // そのため、ここにあった記事の表示/非表示の間引き・「該当なしの案内」・
+  // ページネーションのdisplay:none切り替えといったクライアント側の
+  // 小細工コード（filterArticlesByMetaState/updateEmptyResultsNotice/
+  // updatePaginationVisibility/applyMetaFilters/bindMetaFilterCheckboxes）は
+  // 全て削除した。0件の場合はWordPress標準の「該当する記事は見つかりません
+  // でした」がそのまま表示される。
 
   function initCardBadges() {
     var articles = document.querySelectorAll('article[id^="post-"]');
@@ -1407,8 +1304,6 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     });
     if (!ids.length) { return; }
 
-    bindMetaFilterCheckboxes();
-
     // ステップ1: LocalStorageを最優先で参照し、ネットワーク応答を待たずに
     // 即座にハートの見た目だけ書き換える（bfcache復元直後でも一覧に既存の
     // バッジがあればここで赤く点灯する）。
@@ -1420,11 +1315,6 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     fetchCardData(ids).then(function (data) {
       if (!data) { return; }
       renderCardBadges(idToMetaEl, data);
-      // バッジの最終状態が確定した直後に、既にチェック済みの絞り込みが
-      // あれば反映する（チェックボックスの状態がページ表示前から
-      // 残っている場合でも、フェッチ完了を待たずに一覧全件を再表示した
-      // ままにしない）。
-      applyMetaFilters();
     });
   }
 

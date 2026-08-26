@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.5.0
+ * Version: 1.6.0
  * Author: junchan-world
  */
 
@@ -267,6 +267,38 @@ class Custom_Search_Category_Filter {
 
     public function filter_search_query($query) {
         if (is_admin() || !$query->is_search() || !$query->is_main_query()) {
+            return;
+        }
+
+        // 【2026-09-01追記：「スキした記事」「購入済み記事」の絞り込みを
+        // 正規のWP_Queryとして再設計】以前はサーバーが返した1ページ10件の
+        // 中からJS側で対象外を非表示にするだけの実装（クライアント側の
+        // 間引き）だったため、1ページ目に該当記事が数件しか無ければ
+        // それ以外の過去記事を一切抽出できず、ページネーションも
+        // 実件数と対応しない不整合な見た目になっていた。
+        //
+        // 対策として、検索フォームウィジェット（custom_html-3、DB側）が
+        // フォーム送信時にLocalStorageの対象記事ID一覧を
+        // liked_ids[]/purchased_ids[] としてGETパラメータに付与するように
+        // した。ここではそれを受け取り、post__inに設定することで、
+        // WordPress自身に全期間から該当記事だけを正しく抽出させ、
+        // 10件ごとの正規のページネーションを自動生成させる
+        // （category__inによる絞り込みとは排他的：liked_filter_active/
+        // purchased_filter_activeのいずれかが送信されていれば、通常の
+        // カテゴリー絞り込みより優先する）。
+        $liked_active = isset($_GET['liked_filter_active']);
+        $purchased_active = isset($_GET['purchased_filter_active']);
+        if ($liked_active || $purchased_active) {
+            $liked_ids = ($liked_active && isset($_GET['liked_ids']) && is_array($_GET['liked_ids']))
+                ? array_map('absint', wp_unslash($_GET['liked_ids'])) : array();
+            $purchased_ids = ($purchased_active && isset($_GET['purchased_ids']) && is_array($_GET['purchased_ids']))
+                ? array_map('absint', wp_unslash($_GET['purchased_ids'])) : array();
+            $ids = array_values(array_unique(array_filter(array_merge($liked_ids, $purchased_ids))));
+            // 該当0件の場合もpost__inを空配列のままにしない（空配列はWP_Queryに
+            // 無視され「絞り込み無し」＝全件表示になってしまうため、存在しない
+            // ID(0)を明示的に指定して「該当なし」をWordPress標準の仕組みで
+            // 正しく表現する）。
+            $query->set('post__in', empty($ids) ? array(0) : $ids);
             return;
         }
 
