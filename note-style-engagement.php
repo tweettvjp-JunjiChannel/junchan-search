@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.0.0
+ * Version: 4.1.0
  * Author: junchan-world
  */
 
@@ -519,6 +519,9 @@ button.nseb-card-badge:active{transform:scale(1.08);}
 .nseb-card-badge.nseb-card-purchased.is-readfree{background:#e3eefb;color:#2f6690;}
 .nseb-stat-purchased.is-purchased{color:#e0245e;font-weight:bold;}
 .nseb-stat-purchased.is-readfree{color:#2f6690;font-weight:bold;}
+#nseb-my-library-tabs{display:flex;flex-wrap:wrap;gap:.5em;justify-content:center;}
+.nseb-library-tab{display:inline-block;padding:.5em 1em;border-radius:999px;background:#f1f1f1;color:#555;text-decoration:none;font-size:.92em;font-weight:bold;white-space:nowrap;}
+.nseb-library-tab.is-active{background:#333;color:#fff;}
 </style>
         <?php
     }
@@ -1318,9 +1321,33 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     });
   }
 
+  // 「📚マイ本棚」のリンク先URLを、その時点のLocalStorage（購入・スキ済みID）
+  // から組み立てる。サーバー側（custom-search-filter.php）はpost__inで
+  // 実際に絞り込むため、ここではURLを正しく組み立てることだけが責務。
+  function buildMyLibraryUrl(tab) {
+    var params = new URLSearchParams();
+    params.set('view', 'my-library');
+    params.set('tab', tab);
+    getPurchasedSet().forEach(function (id) { params.append('purchased_ids[]', id); });
+    getLikedSet().forEach(function (id) { params.append('liked_ids[]', id); });
+    return window.location.origin + '/?' + params.toString();
+  }
+
+  function wireMyLibraryLinks() {
+    var entryLink = document.getElementById('nseb-my-library-link');
+    if (entryLink) {
+      entryLink.href = buildMyLibraryUrl('purchased');
+    }
+    var tabs = document.querySelectorAll('.nseb-library-tab[data-tab]');
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].href = buildMyLibraryUrl(tabs[i].getAttribute('data-tab'));
+    }
+  }
+
   function refreshAll() {
     initStatusBar();
     initCardBadges();
+    wireMyLibraryLinks();
   }
 
   // DOMを触らないため、DOMContentLoadedを待たずページ読み込み直後に判定する。

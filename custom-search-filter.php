@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.6.0
+ * Version: 1.7.0
  * Author: junchan-world
  */
 
@@ -54,9 +54,21 @@ class Custom_Search_Category_Filter {
     // クエリ側でこの現実的でない期間を除外する方式を採用する。
     const ARCHIVE_MIN_DATE = '2000-01-01 00:00:00';
 
+    // 【2026-09-02追記】「マイ本棚」機能で使うクエリ変数・タブ名の定数。
+    const MY_LIBRARY_VIEW = 'my-library';
+    const MY_LIBRARY_TABS = array('purchased', 'liked', 'both');
+
     public function __construct() {
         add_action('pre_get_posts', array($this, 'filter_search_query'));
         add_action('pre_get_posts', array($this, 'filter_front_page_query'));
+        // 【2026-09-02追記：「マイ本棚」機能】購入した記事/スキした記事/
+        // 両方(AND)をpost__inで正しく全期間から抽出する専用ビュー
+        // （?view=my-library）。filter_front_page_queryより後に登録し、
+        // かつfilter_front_page_query側にも早期returnガードを追加すること
+        // で、is_home()扱いになるこのビューにcategory__inが二重に
+        // 適用されないようにしている。
+        add_action('pre_get_posts', array($this, 'filter_my_library_query'));
+        add_action('loop_start', array($this, 'render_my_library_tabs'));
         add_action('template_redirect', array($this, 'redirect_legacy_category_archive'));
         add_filter('posts_join', array($this, 'join_full_title_meta'), 10, 2);
         add_filter('posts_search', array($this, 'extend_search_to_full_title'), 10, 2);
@@ -219,6 +231,12 @@ class Custom_Search_Category_Filter {
         if (is_admin() || !$query->is_home() || !$query->is_main_query()) {
             return;
         }
+        // 「マイ本棚」（?view=my-library）はis_home()として扱われるが、
+        // category__inではなくpost__in（filter_my_library_query）で
+        // 絞り込むべきビューのため、ここでは何もしない。
+        if (isset($_GET['view']) && $_GET['view'] === self::MY_LIBRARY_VIEW) {
+            return;
+        }
 
         $cat_ids = array();
         foreach (self::DEFAULT_CHECKED as $key) {
@@ -229,6 +247,99 @@ class Custom_Search_Category_Filter {
         if (!empty($cat_ids)) {
             $query->set('category__in', $cat_ids);
         }
+    }
+
+    /**
+     * 【2026-09-02追記：「マイ本棚」機能】前回の実装（検索フォームの
+     * チェックボックス経由でliked_ids[]/purchased_ids[]をpost__inに渡す方式）
+     * を、専用のビュー（?view=my-library&tab=purchased|liked|both）へ
+     * 切り出した。検索フォームは通常検索（キーワード＋カテゴリ）に専念させる。
+     *
+     * タブごとの対象ID：
+     *   purchased : purchased_ids[]（LocalStorageのnseb_purchased_posts）
+     *   liked     : liked_ids[]（LocalStorageのnseb_liked_posts）
+     *   both      : purchased_ids[] と liked_ids[] の共通要素（array_intersect）
+     *
+     * このビューはURLに s パラメータを持たない（is_home()扱い）ため、
+     * filter_front_page_query() 側にも早期returnガードを追加し、
+     * category__inによる絞り込みと二重適用にならないようにしている。
+     * 該当0件の場合もpost__inを空配列のままにしない（空配列はWP_Queryに
+     * 無視され「絞り込み無し」＝全件表示になってしまうため）、存在しない
+     * ID(0)を明示的に指定して「該当なし」をWordPress標準の仕組みで
+     * 正しく表現する。
+     */
+    public function filter_my_library_query($query) {
+        if (is_admin() || !$query->is_main_query()) {
+            return;
+        }
+        if (!isset($_GET['view']) || $_GET['view'] !== self::MY_LIBRARY_VIEW) {
+            return;
+        }
+
+        $tab = isset($_GET['tab']) ? sanitize_text_field(wp_unslash($_GET['tab'])) : 'purchased';
+        if (!in_array($tab, self::MY_LIBRARY_TABS, true)) {
+            $tab = 'purchased';
+        }
+
+        $purchased_ids = (isset($_GET['purchased_ids']) && is_array($_GET['purchased_ids']))
+            ? array_map('absint', wp_unslash($_GET['purchased_ids'])) : array();
+        $liked_ids = (isset($_GET['liked_ids']) && is_array($_GET['liked_ids']))
+            ? array_map('absint', wp_unslash($_GET['liked_ids'])) : array();
+
+        switch ($tab) {
+            case 'liked':
+                $ids = $liked_ids;
+                break;
+            case 'both':
+                $ids = array_values(array_intersect($purchased_ids, $liked_ids));
+                break;
+            case 'purchased':
+            default:
+                $ids = $purchased_ids;
+                break;
+        }
+        $ids = array_values(array_unique(array_filter($ids)));
+
+        $query->set('post_type', 'post');
+        $query->set('post__in', empty($ids) ? array(0) : $ids);
+    }
+
+    /**
+     * 「マイ本棚」ビュー（?view=my-library）の一覧上部に、3つの切り替え
+     * タブ（購入した記事/スキした記事/購入&スキ）を出力する。実際の
+     * href（?purchased_ids[]=.../liked_ids[]=...）は、LocalStorageの現在の
+     * 記事ID一覧を読める側＝JS（note-style-engagement.php の
+     * wireMyLibraryLinks）が後から書き換える。ここではdata-tab属性付きの
+     * プレースホルダを出力するだけでよい。
+     *
+     * loop_start はメインループ以外（ウィジェット内のミニクエリ等）でも
+     * 発火しうるため、$queryがメインクエリかどうかを確認し、かつ1リクエスト
+     * につき1回だけ出力する。
+     */
+    public function render_my_library_tabs($query) {
+        if (is_admin() || !$query->is_main_query()) {
+            return;
+        }
+        if (!isset($_GET['view']) || $_GET['view'] !== self::MY_LIBRARY_VIEW) {
+            return;
+        }
+        static $rendered = false;
+        if ($rendered) {
+            return;
+        }
+        $rendered = true;
+
+        $current_tab = isset($_GET['tab']) ? sanitize_text_field(wp_unslash($_GET['tab'])) : 'purchased';
+        if (!in_array($current_tab, self::MY_LIBRARY_TABS, true)) {
+            $current_tab = 'purchased';
+        }
+        ?>
+<div id="nseb-my-library-tabs" style="margin:0 0 1.5em;text-align:center;">
+  <a href="#" data-tab="purchased" class="nseb-library-tab<?php echo $current_tab === 'purchased' ? ' is-active' : ''; ?>">🛒 購入した記事</a>
+  <a href="#" data-tab="liked" class="nseb-library-tab<?php echo $current_tab === 'liked' ? ' is-active' : ''; ?>">♥ スキした記事</a>
+  <a href="#" data-tab="both" class="nseb-library-tab<?php echo $current_tab === 'both' ? ' is-active' : ''; ?>">🌟 購入＆スキ（両方）</a>
+</div>
+        <?php
     }
 
     /**
@@ -267,38 +378,6 @@ class Custom_Search_Category_Filter {
 
     public function filter_search_query($query) {
         if (is_admin() || !$query->is_search() || !$query->is_main_query()) {
-            return;
-        }
-
-        // 【2026-09-01追記：「スキした記事」「購入済み記事」の絞り込みを
-        // 正規のWP_Queryとして再設計】以前はサーバーが返した1ページ10件の
-        // 中からJS側で対象外を非表示にするだけの実装（クライアント側の
-        // 間引き）だったため、1ページ目に該当記事が数件しか無ければ
-        // それ以外の過去記事を一切抽出できず、ページネーションも
-        // 実件数と対応しない不整合な見た目になっていた。
-        //
-        // 対策として、検索フォームウィジェット（custom_html-3、DB側）が
-        // フォーム送信時にLocalStorageの対象記事ID一覧を
-        // liked_ids[]/purchased_ids[] としてGETパラメータに付与するように
-        // した。ここではそれを受け取り、post__inに設定することで、
-        // WordPress自身に全期間から該当記事だけを正しく抽出させ、
-        // 10件ごとの正規のページネーションを自動生成させる
-        // （category__inによる絞り込みとは排他的：liked_filter_active/
-        // purchased_filter_activeのいずれかが送信されていれば、通常の
-        // カテゴリー絞り込みより優先する）。
-        $liked_active = isset($_GET['liked_filter_active']);
-        $purchased_active = isset($_GET['purchased_filter_active']);
-        if ($liked_active || $purchased_active) {
-            $liked_ids = ($liked_active && isset($_GET['liked_ids']) && is_array($_GET['liked_ids']))
-                ? array_map('absint', wp_unslash($_GET['liked_ids'])) : array();
-            $purchased_ids = ($purchased_active && isset($_GET['purchased_ids']) && is_array($_GET['purchased_ids']))
-                ? array_map('absint', wp_unslash($_GET['purchased_ids'])) : array();
-            $ids = array_values(array_unique(array_filter(array_merge($liked_ids, $purchased_ids))));
-            // 該当0件の場合もpost__inを空配列のままにしない（空配列はWP_Queryに
-            // 無視され「絞り込み無し」＝全件表示になってしまうため、存在しない
-            // ID(0)を明示的に指定して「該当なし」をWordPress標準の仕組みで
-            // 正しく表現する）。
-            $query->set('post__in', empty($ids) ? array(0) : $ids);
             return;
         }
 
