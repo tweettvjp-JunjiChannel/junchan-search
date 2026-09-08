@@ -1,0 +1,502 @@
+<style id="nseb-full-title-css">
+/* 【2026-09-08 追加修正】フルタイトル化のJS置換（[nseb-full-title]）自体は
+   成功していたが、Cocoonテーマ側の.entry-card-title（および内部のa）に
+   -webkit-line-clamp:3 + overflow:hiddenが掛かっており、置換後の長い
+   フルタイトルが3行で強制的に見切れて隠されていることが実機コンソール
+   ログとgetComputedStyle調査で判明した（webkitLineClamp:'3',
+   clientHeight:86px/scrollHeight:288pxを実機確認）。静的な<style>として
+   即時適用し、JS実行タイミングに依存せず確実に解除する。 */
+.entry-card-title,
+.entry-card-title a,
+.entry-title,
+.entry-title a {
+  -webkit-line-clamp: unset !important;
+  display: block !important;
+  max-height: none !important;
+  overflow: visible !important;
+  text-overflow: unset !important;
+  white-space: normal !important;
+}
+</style>
+<style id="nseb-search-clear-css">
+.nseb-search-input-wrap{position:relative;display:block;}
+.nseb-search-input-wrap .search-field{width:100%;box-sizing:border-box;padding-right:1.8em;}
+.nseb-search-clear-btn{display:none;position:absolute;top:50%;right:0.4em;transform:translateY(-50%);width:1.4em;height:1.4em;align-items:center;justify-content:center;border:none;background:transparent;color:#888;font-size:1em;line-height:1;cursor:pointer;padding:0;}
+.nseb-search-clear-btn.is-visible{display:flex;}
+.nseb-search-clear-btn:hover{color:#333;}
+</style>
+<form role="search" method="get" class="custom-search-filter-form" action="https://junchan-world.com/">
+<label class="screen-reader-text" for="custom-search-filter-input">検索</label>
+<div class="nseb-search-input-wrap">
+<input type="search" id="custom-search-filter-input" class="search-field" name="s" placeholder="検索" value="">
+<button type="button" class="nseb-search-clear-btn" id="nseb-search-clear-btn" aria-label="検索キーワードをクリア">&times;</button>
+</div>
+<input type="hidden" name="filter_submitted" value="1">
+<div class="custom-search-filter-checkboxes" style="font-size:0.82em;line-height:1.6;margin:0.5em 0;">
+<label style="margin-right:0.8em;white-space:nowrap;"><input type="checkbox" name="filter_cats[]" value="note" checked> note</label>
+<label style="margin-right:0.8em;white-space:nowrap;"><input type="checkbox" name="filter_cats[]" value="exblog" checked> エキサイトブログ</label>
+<label style="margin-right:0.8em;white-space:nowrap;"><input type="checkbox" name="filter_cats[]" value="tweettv_scenario"> TweetTVシナリオ</label>
+<label style="margin-right:0.8em;white-space:nowrap;"><input type="checkbox" name="filter_cats[]" value="deleted_tweet"> 削除ツイート</label>
+</div>
+<button type="submit" class="search-submit">検索</button>
+</form>
+<div style="display:flex;gap:0.5em;margin-top:0.6em;align-items:stretch;">
+<a id="nseb-home-link" href="https://junchan-world.com/" class="nseb-home-btn" style="flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:0.5em 0.6em;background:#3b7ddb;color:#fff;text-decoration:none;border-radius:6px;text-align:center;font-size:0.78em;font-weight:bold;white-space:nowrap;">📰 記事ホーム</a>
+<a id="nseb-my-library-link" href="#" style="flex:1;display:block;padding:0.5em 0.6em;background:#333;color:#fff;text-decoration:none;border-radius:6px;text-align:center;font-size:0.9em;font-weight:bold;">📚 マイ本棚</a>
+</div>
+<a id="nseb-account-guide-link" href="https://junchan-world.com/account/" style="display:block;margin-top:0.5em;padding:0.5em 0.6em;background:#fdecea;color:#c0392b;border:1px solid #e6b0aa;text-decoration:none;border-radius:6px;text-align:center;font-size:0.82em;font-weight:bold;">🔧 購読の確認・解約／お問い合わせ</a>
+<script>
+(function(){
+  var STORAGE_KEY = 'searchFilterCatsV1';
+
+  // 2026-08-29追記：ページネーションリンクのURLは、WordPress標準のadd_query_arg由来の仕様により、
+  // 配列パラメータを filter_cats[] ではなく filter_cats[0]・filter_cats[1]… という
+  // 添字付きの形に書き換えて生成する（実機確認済み）。以前の実装は
+  // filter_cats[] というリテラルキーのみを見ていたため、検索結果の2ページ目以降で
+  // チェックボックスが全て外れて見える不具合があった。両方の表記に対応する。
+  function getUrlCats(){
+    var params = new URLSearchParams(window.location.search);
+    if (!params.has('filter_submitted')) return null;
+    var result = [];
+    params.forEach(function (value, key) {
+      if (/^filter_cats\[\d*\]$/.test(key)) {
+        result.push(value);
+      }
+    });
+    return result;
+  }
+
+  var urlCats = getUrlCats();
+
+  // 【2026-09-09追記：検索キーワードのURL自動復元】検索フォームの送信は
+  // PJAX対象外の通常のGET送信のため、送信のたびにブラウザがサーバーから
+  // ページ全体（このウィジェットのHTML自体を含む）を再取得・再実行する。
+  // 入力欄のvalue属性がこのHTML内に静的に"" と書かれたままだったため、
+  // 検索結果ページを開いてもURL（?s=大谷翔平）の値が入力欄へ一切反映
+  // されず、メイン側には結果が出ているのにサイドバーの検索窓だけ空欄に
+  // 見える不具合があった（実機報告により判明）。読み込み時・PJAX遷移時の
+  // 両方で必ずURLの s パラメータを読み、入力欄へ反映する。
+  function updateClearButtonState(input) {
+    var wrap = input.closest('.nseb-search-input-wrap');
+    var btn = wrap ? wrap.querySelector('.nseb-search-clear-btn') : null;
+    if (!btn) { return; }
+    btn.classList.toggle('is-visible', input.value.length > 0);
+  }
+
+  function syncSearchInputFromLocation(search) {
+    var params = new URLSearchParams(search !== undefined && search !== null ? search : window.location.search);
+    var sVal = params.has('s') ? params.get('s') : '';
+    var inputs = document.querySelectorAll('.custom-search-filter-form input[name="s"]');
+    for (var i = 0; i < inputs.length; i++) {
+      inputs[i].value = sVal;
+      updateClearButtonState(inputs[i]);
+    }
+  }
+
+  syncSearchInputFromLocation();
+
+  // 【2026-09-09追記：プラグイン本体を一切変更せず、このウィジェット単体で
+  // PJAX遷移にも追従させる】PJAX遷移（ページネーション・ソート・カテゴリー等）
+  // はcustom-search-filter.php側のpjaxNavigate()が#main側だけを差し替える
+  // 仕組みで、このウィジェットのscriptタグ自体は再実行されない。プラグイン
+  // 本体のファイルを編集して同期フックを追加する運用は取りやめたため、
+  // window.history.pushStateをこのウィジェット自身でラップし、pjaxNavigate
+  // 内部のhistory.pushState()呼び出し（history.pushState({nsebPjax:true}, '', url)）
+  // を検知した直後に必ず入力欄を再同期する。ブラウザの戻る/進む操作
+  // （popstateイベント。pjaxNavigateはpush=falseで呼ばれるためpushStateは
+  // 発火しない）も別途購読して同じ関数を呼ぶことで、pushState/popstate双方の
+  // 経路をこのウィジェット単独でカバーする。
+  try {
+    var _origPushState = window.history.pushState;
+    window.history.pushState = function () {
+      var ret = _origPushState.apply(this, arguments);
+      try { syncSearchInputFromLocation(); } catch (e) {}
+      return ret;
+    };
+  } catch (e) {}
+
+  window.addEventListener('popstate', function () {
+    syncSearchInputFromLocation();
+  });
+
+  document.addEventListener('input', function (e) {
+    if (e.target && e.target.matches && e.target.matches('.custom-search-filter-form input[name="s"]')) {
+      updateClearButtonState(e.target);
+    }
+  });
+
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('.nseb-search-clear-btn') : null;
+    if (!btn) { return; }
+    var wrap = btn.closest('.nseb-search-input-wrap');
+    var input = wrap ? wrap.querySelector('input[name="s"]') : null;
+    if (!input) { return; }
+    input.value = '';
+    updateClearButtonState(input);
+    input.focus();
+  });
+
+  var forms = document.querySelectorAll('.custom-search-filter-form');
+  for (var f = 0; f < forms.length; f++) {
+    (function(form){
+      var boxes = form.querySelectorAll('input[type=checkbox][name="filter_cats[]"]');
+
+      var applyVals = null;
+      if (urlCats !== null) {
+        applyVals = urlCats;
+      } else {
+        try {
+          var saved = window.localStorage.getItem(STORAGE_KEY);
+          if (saved !== null) applyVals = JSON.parse(saved);
+        } catch(e) {}
+      }
+      if (applyVals !== null) {
+        for (var i = 0; i < boxes.length; i++) {
+          boxes[i].checked = applyVals.indexOf(boxes[i].value) !== -1;
+        }
+      }
+
+      function saveState(){
+        var checkedVals = [];
+        for (var i = 0; i < boxes.length; i++) {
+          if (boxes[i].checked) checkedVals.push(boxes[i].value);
+        }
+        try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(checkedVals)); } catch(e) {}
+      }
+      for (var i = 0; i < boxes.length; i++) {
+        boxes[i].addEventListener('change', saveState);
+      }
+      saveState();
+    })(forms[f]);
+  }
+
+  // 【2026-09-02追記】「マイ本棚」クリック時、サイドバーのアコーディオンを
+  // 大分類のみの初期状態（全閉じ）へリセットする。マイ本棚は特定カテゴリーの
+  // 文脈ではない「別のビュー」のため、直前まで開いていたカテゴリー階層を
+  // 表示したままにしておく意味が無く、むしろ紛らわしいための対応。
+  // リセット関数は記事カテゴリーウィジェット（custom_html-4）側で定義・公開
+  // されている。通常のページ遷移（PJAX化していない）なのでpreventDefaultは
+  // 行わず、遷移前にsessionStorageの記録だけ同期的に消しておけばよい。
+  var libraryBtn = document.getElementById('nseb-my-library-link');
+  if (libraryBtn) {
+    libraryBtn.addEventListener('click', function () {
+      if (typeof window.nsebResetSidebarAccordion === 'function') {
+        window.nsebResetSidebarAccordion();
+      }
+    });
+  }
+
+  // 【2026-09-09追記：サイドバー状態の完全隔離】初期化（アコーディオン
+  // 開閉状態・選択中ハイライトの全解除）は「📰記事ホーム」または最上部の
+  // ホームアイコンが明示的にクリックされた時のみに限定する仕様のため、
+  // マイ本棚と全く同じ関数で記事ホームクリック時にもリセットする。
+  // この#nseb-home-link自体はcustom-search-filter.php側の document
+  // capture-phaseリスナーで別途preventDefault＋PJAX遷移されるが、
+  // stopPropagation()は呼ばれていないため、このリスナー（要素直付け、
+  // target phase）は独立して常に実行される。
+  var homeBtn = document.getElementById('nseb-home-link');
+  if (homeBtn) {
+    homeBtn.addEventListener('click', function () {
+      if (typeof window.nsebResetSidebarAccordion === 'function') {
+        window.nsebResetSidebarAccordion();
+      }
+      // 【2026-09-08追記：CM群のスマホ先頭配置を明示的に保証】通常は
+      // #mainのPJAX差し替えをMutationObserverが検知して自動的に
+      // nsebApplyListFixes()が再実行されるが、「確実にイベントを拾う」
+      // ため、この明示的なクリック経路からも遅延実行で二重に呼ぶ
+      // （冪等な処理のため多重実行しても無害）。PJAXのfetch＋DOM差し替え
+      // 完了を待つため、複数タイミングで呼び直す。
+      [300, 800, 1500].forEach(function (delay) {
+        setTimeout(function () {
+          if (typeof window.nsebApplyListFixes === 'function') { window.nsebApplyListFixes(); }
+        }, delay);
+      });
+    });
+  }
+})();
+</script>
+<script>
+(function () {
+  // 【2026-09-07追記：ソートボタンactive表示のズレ修正】オーナー実機検証で、
+  // 「閲覧数順」→「新着順」とクリックしても青いactive表示が1つ前に選んだ
+  // ボタンに残り続ける不具合が発覚した。原因はcustom-search-filter.php側の
+  // pjaxNavigate()内で、一覧を再構築するenhanceListingArea()（内部で
+  // buildSortTabs()がwindow.location.searchのsort=を読んで active クラスを
+  // 決める）が、history.pushState()より先に実行されていること
+  // （実機のスクリプトソースで行番号を確認済み）。これにより
+  // buildSortTabs()は常に「1つ前のURL」のsort値でタブを再構築してしまう。
+  // プラグイン本体（custom-search-filter.php）は現在wp-admin側の再ログインが
+  // 必要な状態で直接編集できないため、そのファイルを触らずに済むよう、
+  // 一覧領域（#main）のDOM変化をMutationObserverで監視し、
+  // enhanceListingArea()が.tc-sort-tabsを再構築し終えた直後（＝ブラウザの
+  // マイクロタスクキューでpushState完了後）に、正しいURLを元に
+  // active クラスだけを外から上書き修正する方式で対応する。
+  function currentSortFromLocation() {
+    try {
+      var v = new URLSearchParams(window.location.search).get('sort');
+      return (v === 'pv' || v === 'like') ? v : 'new';
+    } catch (e) { return 'new'; }
+  }
+  var LABEL_TO_KEY = { '新着順': 'new', '閲覧数順': 'pv', 'スキ数順': 'like' };
+  function fixSortTabsActiveClass() {
+    var tabs = document.querySelectorAll('.tc-sort-tabs a.tc-sort-tab');
+    if (!tabs.length) { return; }
+    var active = currentSortFromLocation();
+    tabs.forEach(function (a) {
+      var label = (a.textContent || '').trim();
+      var key = LABEL_TO_KEY[label];
+      var shouldBeActive = key === active;
+      a.classList.toggle('tc-sort-tab-active', shouldBeActive);
+    });
+  }
+  // 【2026-09-08 再修正：フルタイトル化を無条件強制上書きに変更】
+  // 当初は「スニペットの先頭がタイトルの先頭30文字と一致する場合のみ」
+  // 置換する条件分岐にしていたが、オーナーの明示的な指示により、この
+  // ような余計な条件分岐は完全に廃止する。CLAUDE.md記載の通り、
+  // auto_sync_blogs.pyで同期される記事はnote/exblogいずれも例外なく
+  // スニペット（.entry-card-snippet）へnote_full_title（切り詰め前の
+  // フルタイトル全文）をそのまま格納する設計のため、判定を挟まず常に
+  // スニペットの内容でタイトルを強制上書きしてよい。
+  function fixCardTitles(root) {
+    var cards = (root || document).querySelectorAll('.entry-card-wrap');
+    cards.forEach(function (card) {
+      var titleEl = card.querySelector('.entry-card-title');
+      var snippetEl = card.querySelector('.entry-card-snippet');
+      if (!titleEl || !snippetEl || titleEl.dataset.nsebFullTitleApplied) { return; }
+      var snippetText = (snippetEl.textContent || '').trim();
+      if (!snippetText) { return; } // スニペットが空の異常系のみ保護（重複判定ではない）
+      titleEl.textContent = snippetText;
+      // 【重要】site-branding.php側が.entry-card-snippetへ
+      // display:-webkit-box!importantを設定しているため、通常の
+      // display='none'代入では上書きできない（実機で確認済み）。
+      // setPropertyの第3引数'important'で優先度を揃えて確実に隠す。
+      snippetEl.style.setProperty('display', 'none', 'important');
+      titleEl.dataset.nsebFullTitleApplied = '1';
+      // 【検証用】実際に置換されたDOMをコンソールへ出力し、フルタイトル
+      // （100文字超）が確実にタイトルタグへ入っていることを実機で
+      // 確認できるようにする。
+      console.log('[nseb-full-title] 置換後 outerHTML (length=' + snippetText.length + '):', titleEl.outerHTML);
+    });
+  }
+
+  // 【2026-09-08追記：個別記事ページのフルタイトル化】記事詳細ページの
+  // h1.entry-titleも一覧同様、Codoc対応で95文字に切り詰められた
+  // post_titleを表示している。本文（.entry-content）冒頭には、青枠
+  // スタイルの「📝 元記事確認用フルタイトル」ブロック（CLAUDE.md記載の
+  // 既存仕様、全記事に共通で挿入されている）が既に存在し、その中の<p>に
+  // note_full_title全文が入っているため、新たなAPI取得は不要で、この
+  // ブロックの中身をそのままh1へ流し込めばよい。置換後は二重表示に
+  // なるためこのブロック自体を非表示にする。
+  function fixSingleArticleTitle() {
+    if (!document.body.classList.contains('single')) { return; }
+    var h1 = document.querySelector('h1.entry-title');
+    if (!h1 || h1.dataset.nsebFullTitleApplied) { return; }
+    var content = document.querySelector('.entry-content');
+    if (!content) { return; }
+    var labelEl = null;
+    var paragraphs = content.querySelectorAll('p');
+    for (var i = 0; i < paragraphs.length; i++) {
+      if ((paragraphs[i].textContent || '').indexOf('元記事確認用フルタイトル') !== -1) {
+        labelEl = paragraphs[i];
+        break;
+      }
+    }
+    if (!labelEl) { return; }
+    var fullTitleEl = labelEl.nextElementSibling;
+    var fullTitleText = fullTitleEl ? (fullTitleEl.textContent || '').trim() : '';
+    if (!fullTitleText) { return; }
+
+    h1.textContent = fullTitleText;
+    h1.dataset.nsebFullTitleApplied = '1';
+    console.log('[nseb-full-title-single] 置換後 h1.outerHTML (length=' + fullTitleText.length + '):', h1.outerHTML);
+
+    // 【重要】役目を終えた本文内の青枠ブロック（labelElの親div）自体を
+    // 非表示にし、読者に二重表示させない。
+    var wrapperBox = labelEl.parentElement;
+    if (wrapperBox) {
+      wrapperBox.style.setProperty('display', 'none', 'important');
+    }
+  }
+
+  // 【2026-09-08追記：トップページCM群の再配置】プラグイン本体
+  // （custom-search-filter.php）が`#list`の先頭に`.jw-home-hero`（CM4枚）を
+  // 出力しており、そのPHPファイル自体は編集できないため、クライアント側の
+  // DOM操作で①最下部への移動②カード順序の固定③文言更新④動画差し替え
+  // を行う。
+  // 【2026-09-08 再修正：localStorageベースの「初回のみ」判定を廃止】
+  // 当初はlocalStorageで「一度でも見たら二度と先頭に出さない」という
+  // 永続フラグ方式にしていたが、オーナーからの再徹底指示に基づき、状態を
+  // 一切持たないURLベースの判定へ作り直す：
+  //   ①スマホ かつ 1ページ目（ページ送りされていない、素の一覧or新着順）
+  //     → 先頭にprepend
+  //   ②それ以外（2ページ目以降・デスクトップ・何らかの絞り込み後の回遊）
+  //     → 最下部にappend
+  // 「ホーム/新着1ページ目」への再訪問は、この判定では常に条件①に該当する
+  // ため、押すたびに先頭表示が再現される（1回きりの永続記録は不要）。
+  function isMobileViewport() {
+    return window.matchMedia('(max-width:959px)').matches;
+  }
+  function isPageOne() {
+    var pathMatch = window.location.pathname.match(/\/page\/(\d+)\/?/);
+    if (pathMatch && parseInt(pathMatch[1], 10) > 1) { return false; }
+    var params = new URLSearchParams(window.location.search);
+    var paged = params.get('paged') || params.get('page');
+    if (paged && parseInt(paged, 10) > 1) { return false; }
+    return true;
+  }
+  function shouldShowCmAtTop() {
+    return isMobileViewport() && isPageOne();
+  }
+  function applyHeroCardContent() {
+    var codocCard = document.querySelector('.jw-hero-codoc');
+    if (codocCard && !codocCard.dataset.nsebReworded) {
+      codocCard.dataset.nsebReworded = '1';
+      var h2 = codocCard.querySelector('h2');
+      var p = codocCard.querySelector('p');
+      if (h2) { h2.textContent = '📚 Google検索からも消された幻のnoteアーカイブが蘇る'; }
+      if (p) { p.textContent = 'note等で最初の頃だけは公開され検索できてた深層記事の数々を、Codoc月額読み放題プランで全文アーカイブ配信中。新着note記事は「最近の記事」などからもチェックできます。'; }
+    }
+
+    var youtubeCard = document.querySelector('.jw-hero-youtube');
+    if (youtubeCard && !youtubeCard.dataset.nsebReworded) {
+      youtubeCard.dataset.nsebReworded = '1';
+      var yH2 = youtubeCard.querySelector('h2');
+      if (yH2) { yH2.textContent = '🎬 AIが読み解くエッセンス解説：NotebookLM解説動画'; }
+      var iframe = youtubeCard.querySelector('iframe');
+      if (iframe) { iframe.src = 'https://www.youtube.com/embed/amVvtXVjcos?list=PLKuq3LRJIIMM'; }
+    }
+
+    // 【重要】ツイキャスの過去放送(movie)は実機調査の結果、iframe埋め込みが
+    // "Not found"／"Login required to watch"となり、埋め込み表示ができない
+    // こと（会員限定コンテンツのため）を複数の動画IDで確認済み。エラー
+    // 文字列を訪問者へ露出させないため、動画埋め込みは行わず、赤枠の目立つ
+    // カードから公式アーカイブページへ誘導する形にする。
+    var broadcastCard = document.querySelector('.jw-hero-broadcast');
+    if (broadcastCard && !broadcastCard.dataset.nsebRebuilt) {
+      broadcastCard.dataset.nsebRebuilt = '1';
+      broadcastCard.style.cssText = 'background:#fff5f5;border:4px solid #c0392b;border-radius:14px;padding:1.4em 1.6em;margin-bottom:1.2em;box-shadow:0 1px 6px rgba(0,0,0,0.1);';
+      broadcastCard.innerHTML =
+        '<h2 style="color:#c0392b;">📡 順チャンネルの紹介：毎週土曜よる8時〜生放送</h2>'
+        + '<p style="color:#333;">『ボーっと生きてんじゃねーよ！』ニュース解説の生放送はツイキャスで毎週配信中。コメントでの参加・過去アーカイブの視聴もできます。</p>'
+        + '<a class="jw-hero-btn" href="https://twitcasting.tv/tweettvjp/archive/" target="_blank" rel="noopener" style="background:#c0392b;color:#fff;">📺 最新の一般放送アーカイブを見る</a>';
+    }
+  }
+  function relocateHeroToBottom() {
+    var list = document.querySelector('#list');
+    var hero = list ? list.querySelector('.jw-home-hero') : null;
+    if (!list || !hero) {
+      console.log('[nseb-cm] .jw-home-hero が見つかりません（このページには存在しない、または未描画）');
+      return;
+    }
+
+    applyHeroCardContent();
+
+    ['.jw-hero-codoc', '.jw-hero-broadcast', '.jw-hero-youtube', '.jw-hero-search'].forEach(function (sel) {
+      var card = hero.querySelector(sel);
+      if (card) { hero.appendChild(card); }
+    });
+
+    var atTop = shouldShowCmAtTop();
+    if (atTop) {
+      if (list.firstElementChild !== hero) { list.insertBefore(hero, list.firstElementChild); }
+    } else if (list.lastElementChild !== hero) {
+      list.appendChild(hero);
+    }
+
+    // 【検証用】実機での物理描画確認のため、配置結果と実際のサイズ・
+    // displayを毎回コンソールへ出力する。
+    console.log(
+      '[nseb-cm] 配置=' + (atTop ? '先頭(prepend)' : '最下部(append)')
+      + ' / viewport=' + window.innerWidth + 'px'
+      + ' / offsetHeight=' + hero.offsetHeight
+      + ' / display=' + getComputedStyle(hero).display
+    );
+  }
+
+  // 【重要】fixCardTitles/relocateHeroToBottomは自分自身がDOMを書き換える
+  // （テキスト差し替え・要素移動）ため、#mainを監視するMutationObserverの
+  // コールバック内でそのまま呼ぶと、その書き換え自体が新たなミューテー
+  // ションとして観測され、コールバックが自分自身を無限に呼び出し続ける
+  // （実機でハング・タイムアウトを確認）。DOM操作中だけ監視を一時停止する
+  // ことで防ぐ。
+  var sortTabObserver;
+  var applyingFixes = false;
+  function applyAllListFixes() {
+    if (applyingFixes) { return; }
+    applyingFixes = true;
+    if (sortTabObserver) { sortTabObserver.disconnect(); }
+    fixSortTabsActiveClass();
+    fixCardTitles();
+    fixSingleArticleTitle();
+    relocateHeroToBottom();
+    if (sortTabObserver) { sortTabObserver.observe(mainEl, { childList: true, subtree: true }); }
+    applyingFixes = false;
+  }
+
+  var mainEl = document.querySelector('#main') || document.body;
+  sortTabObserver = new MutationObserver(function () {
+    applyAllListFixes();
+  });
+  applyAllListFixes();
+  sortTabObserver.observe(mainEl, { childList: true, subtree: true });
+
+  // 【2026-09-08追記：記事ホーム／ホームアイコン押下時のCM再配置を明示的に
+  // 保証】MutationObserver経由の自動再適用は#mainのDOM差し替えを検知して
+  // 動作するため理論上PJAXでのホーム復帰も捕捉できるはずだが、オーナーの
+  // 指示に基づき「確実にイベントを拾う」ための明示的な冗長経路も別途
+  // 用意する（多重実行しても冪等なため無害）。他の<script>ブロックからも
+  // 呼べるようグローバル公開する。
+  window.nsebApplyListFixes = applyAllListFixes;
+})();
+</script>
+<script>
+(function () {
+  // 【2026-09-08追記：未購入記事の目次(TOC)ジャンプ改善】nav.tocのリンクは
+  // #{見出しid}への素のアンカーだが、Codocは有料記事を未購入で開いた場合、
+  // 無料プレビュー部分＋購入枠までしかDOMへ描画せず、有料エリアの見出しは
+  // 要素自体が存在しない（実機調査で確認：購入枠より後の見出しはDOMに
+  // 無い）。そのままでは標準のアンカー機能では何も起きず「クリックしても
+  // 動かない」バグになる。noteの本家仕様に合わせ、対象の見出しが（Codocの
+  // 非同期描画完了を待っても）見つからない場合は、無料エリアの末尾＝購入枠
+  // (.codoc-buy-wrap)までスムーズスクロールし、直後に購入枠を一時的に
+  // ハイライトして注意を引く。
+  var STYLE_ID = 'nseb-toc-paywall-style';
+  if (!document.getElementById(STYLE_ID)) {
+    var style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = '.nseb-toc-paywall-focus{animation:nsebTocPaywallPulse .6s ease-in-out 2;border-radius:8px;}'
+      + '@keyframes nsebTocPaywallPulse{0%,100%{box-shadow:0 0 0 0 rgba(192,57,43,0);}50%{box-shadow:0 0 0 6px rgba(192,57,43,.35);}}';
+    document.head.appendChild(style);
+  }
+
+  document.addEventListener('click', function (e) {
+    var link = e.target.closest('nav.toc a[href^="#"]');
+    if (!link) { return; }
+    e.preventDefault();
+    var targetId = link.getAttribute('href').slice(1);
+    var attempts = 0;
+    var MAX_ATTEMPTS = 15;
+    (function tryFind() {
+      var el = document.getElementById(targetId);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        try { history.pushState(null, '', '#' + targetId); } catch (err) {}
+        return;
+      }
+      attempts++;
+      if (attempts < MAX_ATTEMPTS) {
+        setTimeout(tryFind, 200);
+        return;
+      }
+      // 有料エリア（見出しが存在しない）と判定。無料エリア末尾の購入枠へ誘導する。
+      var boundary = document.querySelector('.codoc-buy-wrap')
+        || document.querySelector('.codoc-more')
+        || document.querySelector('.wp-block-codoc-codoc-block');
+      if (!boundary) { return; }
+      boundary.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      boundary.classList.add('nseb-toc-paywall-focus');
+      setTimeout(function () { boundary.classList.remove('nseb-toc-paywall-focus'); }, 2200);
+    })();
+  }, true);
+})();
+</script>
