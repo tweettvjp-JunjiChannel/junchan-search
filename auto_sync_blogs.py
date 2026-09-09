@@ -560,6 +560,23 @@ def truncate_title_for_codoc(title: str) -> str:
 
 # ==================== 1. note 新着記事の自動投稿 ====================
 
+HASH_TAG_PREFIX_CHARS = "#＃"
+
+
+def normalize_note_tag_name(name: str) -> str:
+    """
+    note.comのハッシュタグ名（例: "#気象兵器"）をWordPressのタグ名として
+    正規化する。先頭の#/＃と前後の空白を除去する。
+    【2026-09-09追記】この正規化を欠いたまま note.com のハッシュタグ文字列を
+    そのまま wp.get_or_create_tag() へ渡していたため、既存のシャープ無し
+    タグ（例:「気象兵器」）と別タグ（「#気象兵器」）として分断・重複作成
+    され、記事がタグ横断で分散する不具合があった（backfill_normalize_
+    hashtag_tags.py で既存データを一括統合済み）。新規タグ取り込みは必ず
+    ここを通すことで、以後同じ分断が再発しないようにする。
+    """
+    return name.strip().lstrip(HASH_TAG_PREFIX_CHARS).strip()
+
+
 def fetch_note_article_list() -> list[dict]:
     """note.com公開APIから公開済み記事の一覧メタデータを取得する（ログイン不要）。"""
     articles = []
@@ -581,7 +598,11 @@ def fetch_note_article_list() -> list[dict]:
                 "price": c.get("price", 0),
                 "publish_at": c.get("publishAt", ""),
                 "thumbnail": c.get("eyecatch") or c.get("thumbnailExternalUrl") or "",
-                "tags": [h["hashtag"]["name"] for h in (c.get("hashtags") or []) if h.get("hashtag")],
+                "tags": list(dict.fromkeys(
+                    normalize_note_tag_name(h["hashtag"]["name"])
+                    for h in (c.get("hashtags") or []) if h.get("hashtag")
+                    and normalize_note_tag_name(h["hashtag"]["name"])
+                )),
                 "paywall_element_id": c.get("separator"),
                 "is_free": price_info.get("isFree", c.get("price", 0) == 0),
                 "like_count": c.get("likeCount", 0),
@@ -969,14 +990,22 @@ def sync_note_updates(
     execute: bool,
     limit: int | None,
     link_maps: tuple[dict, dict],
+    force_keys: set[str] | None = None,
 ) -> list[dict]:
     print("\n" + "=" * 60)
     print(f"【3】note記事の更新追従（公開から{NOTE_UPDATE_WINDOW_DAYS}日以内）")
     print("=" * 60)
 
+    force_keys = force_keys or set()
+
     now = datetime.now()
     recent = []
     for a in articles:
+        if a["key"] in force_keys:
+            # 【2026-09-09追記：即時更新の強制指定】--key で明示された記事は、
+            # 30日ウィンドウの対象外（古い記事の後追い修正等）であっても必ず含める。
+            recent.append(a)
+            continue
         if not a["publish_at"]:
             continue
         try:
@@ -985,7 +1014,8 @@ def sync_note_updates(
             continue
         if (now - pub_dt).days <= NOTE_UPDATE_WINDOW_DAYS:
             recent.append(a)
-    print(f"公開から{NOTE_UPDATE_WINDOW_DAYS}日以内のnote記事: {len(recent)}件")
+    print(f"公開から{NOTE_UPDATE_WINDOW_DAYS}日以内のnote記事: {len(recent)}件"
+          + (f"（うち強制指定: {len(force_keys)}件）" if force_keys else ""))
 
     if limit:
         recent = recent[:limit]
@@ -997,6 +1027,10 @@ def sync_note_updates(
     note_state = state.setdefault("note", {})
 
     from playwright.sync_api import sync_playwright
+    # 【2026-09-01追記】content更新でCodoc側の購読プラン紐付けが解除される副作用
+    # への対策（backfill_internal_links.py のdocstring・CLAUDE.md参照）。
+    # update-noteは本文を書き換える経路のため、更新のたびに再確認・再設定する。
+    from backfill_codoc_subscription_linkage import process_entry as relink_codoc_subscription
 
     with sync_playwright() as pw:
         context, page = get_note_browser_page(pw, headless=True)
@@ -1011,15 +1045,29 @@ def sync_note_updates(
                 print(f"[{i}/{len(recent)}] {a['title'][:50]}")
                 try:
                     body_html = fetch_note_body_html(page, a["url"])
-                    new_hash = body_hash(body_html)
-                    old_hash = note_state.get(key, {}).get("body_hash")
+                    # 【2026-09-09追記：タイトル・タグのみの変更を見逃していた不具合の修正】
+                    # 従来は本文HTMLのハッシュだけで変更を検知していたため、note.com側で
+                    # タイトルやハッシュタグ（タグ）だけを編集し本文自体は変えていない
+                    # ケース（例: nac32945bc0e8 のタイトルへの「【気象兵器】」追記）が
+                    #「変更なし」判定されてしまい、note_full_title・タグがWordPress側へ
+                    # 一切反映されないという不具合があった（検索結果のタイトル一致優先
+                    # ソート・サイドバーのタグ一覧の双方に影響していた）。タイトル・タグも
+                    # ハッシュの対象に含める。
+                    change_signature = (
+                        (a["title"] or "") + "\n"
+                        + ",".join(sorted(a.get("tags") or [])) + "\n"
+                        + body_html
+                    )
+                    new_hash = body_hash(change_signature)
+                    old_hash = note_state.get(key, {}).get("content_hash")
+                    forced = key in force_keys
 
-                    if old_hash == new_hash:
+                    if old_hash == new_hash and not forced:
                         print("    変更なし")
                         time.sleep(REQUEST_DELAY_SECONDS)
                         continue
 
-                    print("    [変更を検出]")
+                    print("    [強制更新]" if forced and old_hash == new_hash else "    [変更を検出]")
                     if not execute:
                         log_rows.append(log_row("update_note", post["id"], slug, a["title"], "dry_run_would_update"))
                         time.sleep(REQUEST_DELAY_SECONDS)
@@ -1064,10 +1112,33 @@ def sync_note_updates(
                         update_payload["categories"] = sorted(set(existing_categories) | {NOTE_CATEGORY_ID} - {1})
                         print(f"    [フォールバック] post_id={post['id']} のnoteカテゴリーを自己修復します")
 
+                    # 【2026-09-09追記】新規投稿時（sync_new_note_posts）と同様、更新時にも
+                    # note.com側の最新タグを必ず同期する。従来はここでタグを一切
+                    # 更新していなかったため、記事公開後に追加・変更されたハッシュタグが
+                    # 「キーワードから探す」一覧へ永遠に反映されない不具合があった。
+                    tag_ids = [wp.get_or_create_tag(t) for t in (a.get("tags") or [])]
+                    tag_ids = [t for t in tag_ids if t]
+                    update_payload["tags"] = tag_ids
+
                     wp.update_post(post["id"], update_payload)
-                    note_state[key] = {"body_hash": new_hash, "price": existing_price}
+                    note_state[key] = {"content_hash": new_hash, "price": existing_price}
                     print(f"    [OK] post_id={post['id']} を更新しました")
                     log_rows.append(log_row("update_note", post["id"], slug, a["title"], "success"))
+
+                    entry_code = (post.get("meta") or {}).get("codoc_entry_code")
+                    if not entry_code:
+                        fresh = wp.get_post(post["id"])
+                        entry_code = (fresh.get("meta") or {}).get("codoc_entry_code")
+                    if entry_code:
+                        try:
+                            relink_result = relink_codoc_subscription(page, entry_code, True)
+                            print(f"    [Codoc再紐付け] entry_code={entry_code} -> {relink_result['status']}")
+                            log_rows.append(
+                                log_row("update_note", post["id"], slug, a["title"], f"codoc_relink_{relink_result['status']}")
+                            )
+                        except Exception as e:
+                            print(f"    [警告] Codoc再紐付けに失敗: {e}")
+                            log_rows.append(log_row("update_note", post["id"], slug, a["title"], "codoc_relink_error", str(e)))
                 except Exception as e:
                     print(f"    [失敗] {e}")
                     log_rows.append(log_row("update_note", post["id"], slug, a["title"], "failed", str(e)))
@@ -1186,6 +1257,13 @@ def main() -> None:
         help="指定した処理だけを実行する（省略時は全処理を実行）",
     )
     parser.add_argument("--limit", type=int, default=None, help="各処理の対象件数の上限（試験実行用）")
+    parser.add_argument(
+        "--key",
+        action="append",
+        default=None,
+        help="指定したnote記事キー（例: nac32945bc0e8）を、公開30日超・本文ハッシュ不変でも"
+             "強制的に最新内容へ即時上書き更新する（複数指定可）。--only update-note と併用も可。",
+    )
     args = parser.parse_args()
 
     creds = load_credentials()
@@ -1199,12 +1277,12 @@ def main() -> None:
 
     all_log_rows: list[dict] = []
 
-    need_link_maps = args.only in (None, "new-note", "new-exblog", "update-note")
+    need_link_maps = args.only in (None, "new-note", "new-exblog", "update-note") or bool(args.key)
     link_maps = fetch_link_maps(wp) if need_link_maps else ({}, {})
     if need_link_maps:
         print(f"内部リンク変換用の対応表を取得しました: note {len(link_maps[0])}件 / exblog {len(link_maps[1])}件")
 
-    need_note_list = args.only in (None, "new-note", "update-note")
+    need_note_list = args.only in (None, "new-note", "update-note") or bool(args.key)
     note_articles = fetch_note_article_list() if need_note_list else []
     if need_note_list:
         print(f"\nnote公開済み記事一覧を取得しました: {len(note_articles)}件")
@@ -1216,12 +1294,86 @@ def main() -> None:
     if args.only in (None, "new-exblog"):
         all_log_rows += sync_new_exblog_posts(wp, args.execute, args.limit, link_maps)
 
-    if args.only in (None, "update-note"):
-        all_log_rows += sync_note_updates(wp, note_articles, state, args.execute, args.limit, link_maps)
+    if args.only in (None, "update-note") or args.key:
+        all_log_rows += sync_note_updates(
+            wp, note_articles, state, args.execute, args.limit, link_maps,
+            force_keys=set(args.key) if args.key else None,
+        )
         save_state(state)
 
     if args.only in (None, "discount-codoc"):
         all_log_rows += sync_codoc_discount(wp, args.execute, args.limit)
+
+    # 【2026-09-02追記：横断的な安全網】content更新に限らずcategories等の更新
+    # だけでもCodoc側の購読プラン紐付けが解除される副作用が確認されている
+    # （backfill_internal_links.py・categorize_articles_ai.py のdocstring参照）。
+    # 個別関数ごとに再紐付け処理を書き込む方式は書き漏れのリスクが常に残るため、
+    # ここで today 実際に post_id が更新された投稿（success系の結果を持つ行）を
+    # 横断的に集約し、Codoc有料記事であれば最後に一括で再紐付けを確認する。
+    # sync_new_note_posts / sync_note_updates は既に個別に再紐付け済みだが、
+    # 二重実行しても process_entry は冪等（既にlinked済みならスキップ）なので
+    # 無害。sync_codoc_discount 等、個別対応していない経路の取りこぼしを
+    # ここで一括して拾う。
+    if args.execute:
+        touched_ids = sorted({
+            row["post_id"] for row in all_log_rows
+            if row.get("post_id") and row.get("result") == "success"
+        })
+        if touched_ids:
+            print("\n" + "=" * 60)
+            print(f"【5】Codoc購読プラン紐付けの横断チェック（本日更新した{len(touched_ids)}件）")
+            print("=" * 60)
+            from backfill_codoc_subscription_linkage import process_entry as relink_codoc_subscription
+            from playwright.sync_api import sync_playwright as _sync_playwright
+            with _sync_playwright() as pw:
+                context, page = get_note_browser_page(pw, headless=True)
+                try:
+                    for pid in touched_ids:
+                        try:
+                            fresh = wp.get_post(pid)
+                            entry_code = (fresh.get("meta") or {}).get("codoc_entry_code")
+                        except Exception as e:
+                            print(f"  id={pid}: [警告] 取得失敗 {e}")
+                            continue
+                        if not entry_code:
+                            continue
+                        try:
+                            result = relink_codoc_subscription(page, entry_code, True)
+                            print(f"  id={pid} entry_code={entry_code} -> {result['status']}")
+                        except Exception as e:
+                            print(f"  id={pid} entry_code={entry_code}: [警告] 再紐付け失敗 {e}")
+                finally:
+                    context.close()
+
+    # 【2026-09-09追記：サイドバー「キーワードから探す（50音順）」の自動最新化】
+    # note記事の新規投稿・更新追従（タグ同期を含む）でWordPressのタグ
+    # （post_tag）が増減しうるのは new-note と update-note の2経路のみ。
+    # 従来はタグ一覧固定ページ（/tags/、generate_tag_index.py）の再生成が
+    # 手動運用のままだったため、新しいキーワードのタグを記事に付けても
+    # サイドバーの一覧に反映されるまで誰かが手動でスクリプトを実行するまで
+    # 気づかれない状態だった。ここで毎回の本番実行の最後に自動で再生成・
+    # 固定ページへ反映することで、以後は同期のたびに必ず追従する。
+    if args.execute and (args.only in (None, "new-note", "update-note") or args.key):
+        print("\n" + "=" * 60)
+        print("【6】サイドバー「キーワードから探す」タグ一覧ページの自動再生成")
+        print("=" * 60)
+        try:
+            import generate_tag_index as tag_index_mod
+            tags = tag_index_mod.fetch_all_tags(wp.site_url, (creds["username"], creds["application_password"]))
+            print(f"使用中のタグ: {len(tags)}件")
+            kks = tag_index_mod.pykakasi.kakasi()
+            page_html = tag_index_mod.build_html(tags, kks)
+            tag_index_mod.OUTPUT_PATH.write_text(page_html, encoding="utf-8")
+            tag_wp = tag_index_mod.WP(creds["site_url"], creds["username"], creds["application_password"])
+            existing = tag_wp.find_page_by_slug(tag_index_mod.PAGE_SLUG)
+            if existing:
+                tag_wp.update_page_content(existing["id"], page_html)
+                print(f"  [OK] タグ一覧ページを更新しました: id={existing['id']} slug={tag_index_mod.PAGE_SLUG}")
+            else:
+                created = tag_wp.create_page(tag_index_mod.PAGE_TITLE, tag_index_mod.PAGE_SLUG, page_html)
+                print(f"  [OK] タグ一覧ページを新規作成しました: id={created['id']} link={created.get('link')}")
+        except Exception as e:
+            print(f"  [警告] タグ一覧ページの自動更新に失敗しました: {e}")
 
     append_log(all_log_rows)
 
