@@ -10,6 +10,7 @@
    ```
    curl -X POST --data-binary "@-" -H "Content-Type: text/plain; charset=utf-8" https://ntfy.sh/junchan2026 <<< "【作業完了】（ここに行った作業の簡単な要約を記載）"
    ```
+3. **報告・確認待ち時の単発ビープ**（2026-08-16追記）：上記の「完了時2重通知」とは別に、Claude Codeが人間へ報告するとき、または人間の入力・確認待ち（承認待ち、質問への回答待ち等）になるタイミングでは、毎回PCから軽いビープ音を1回鳴らすこと（例：`winsound.Beep(1200, 300)`。Pythonの対話実行やBashの`powershell.exe -Command "[console]::beep(1200,300)"`等、その場で使える手段でよい）。近くにいる社長がPC画面を注視していなくても、報告・確認待ちのタイミングに気づけるようにするための軽量な合図であり、都度ntfy通知までは不要（ntfyは1.の完了時のみでよい）。
 
 ## 2. 記事・コンテンツ構造の絶対仕様
 - 本文構造：サブスク案内（赤枠）の直下に、元記事確認用の完全なタイトルを表示する「青枠スタイルボックス」を必ず配置すること。
@@ -119,6 +120,42 @@
   3. **save_postだけでは足りない理由（重要な設計教訓）**：WP REST APIでの新規投稿作成（`auto_sync_blogs.py`が使う経路）は、`wp_insert_post()`（ここで`save_post`が発火）の**後に**`register_post_meta`で登録したメタフィールド（`note_full_title`含む）をDBへ書き込む処理が走る。つまり`save_post`発火時点では、その投稿に紐づく`note_full_title`はまだDBに保存されておらず、`get_post_meta()`で読んでも空文字が返る。この非同期的な処理順序に気づかず`save_post`だけに頼ると、まさに今回主な適用対象であるREST経由の新規note記事同期で一件も自動分類が働かない、という致命的な取りこぼしになる。対策として、`update_post_meta()`/`add_post_meta()`がDB書き込み**完了後**に発火する`updated_post_meta`/`added_post_meta`アクション（`note_full_title`キーのみに絞る）を主経路として追加し、`save_post`は「wp-admin編集画面で本文エディタから直接タイトルを書き換えた」等、メタ更新を伴わないケースのためのフォールバックとして残す設計にした。**新しく「投稿作成・更新時に付随データを見て自動判定する」処理を実装する際は、REST API経由の作成では`save_post`発火時点でカスタムメタがまだ未反映であることを前提に設計すること（`save_post`単体では不十分な場合がある）。**
 - **バックフィル**：`backfill_news_category.py`で、既存記事のうち`note_full_title`（無ければ`post_title`）が上記パターンに合致し、かつ「ニュース」カテゴリーが未付与のものを一括検出・付与した（デフォルトはドライラン、`--execute`で本番反映。ロジックはPHP側の`title_looks_like_news()`と同一の正規表現を維持すること）。2026-08-16実行、対象156件・成功156件（既存の「note」カテゴリーは全件維持、複数カテゴリー所属化を確認）。
 - **検証**：(1) REST APIで実際にテスト投稿を新規作成し（`note_full_title`をニュースパターンに合致させたケースと合致させないケースの両方）、前者にのみ「ニュース」カテゴリーが自動付与されることを確認後、テスト投稿は完全削除（`force=true`）で後始末した。(2) `/category/ニュース/`の1ページ目を実機（Playwright）で確認し、バックフィルで最新分類されたnote記事（2026-08-08付）が先頭に表示され、507/404/500等のエラー文字列が露出していないことを確認した。(3) `/category/ニュース/`が301リダイレクトされず200を返すこと、一方で`/category/tweettv/`は引き続き301でトップへリダイレクトされることを両方確認した。
+
+## 18. Codoc購読プラン紐付けの二段階認証対応と、週次/月次/全件バックフィルの運用自動化バッチ整備（2026-09-13 追記）
+
+### 背景：サブスク加入済みでも単品購入ボタンが出る不具合
+月額サブスク加入済み・Codocログイン済みでも個別記事で単品購入ボタンが表示される不具合が発生した。原因は8項で確立した「Codoc記事編集画面の『購読プラン販売』チェックボックスが外れている」不具合の再発（327記事中25件が未紐付き）で、`backfill_codoc_subscription_linkage.py`で本番修復した。
+
+- **Codoc側に二段階認証（メール宛6桁コード）が新設されていた**：同スクリプトの`ensure_logged_in()`が「URLに`/login`を含まない＝ログイン成功」と誤判定するバグがあり、2FA待ちページ（`/two_factor/auth`）も「ログイン成功」扱いにしてしまい、その後のcheckbox探索が必ず`checkbox_not_found`になっていた。`/two_factor`を明示的に検知して`login_failed`扱いにするよう修正済み。2FAコードの自動取得はできない（メール受信者本人しか読めない）ため、**Codoc関連の自動化スクリプトは30日ごとに一度、人間による認証コード入力が必要**（「このデバイスを30日間信頼する」で以後30日は自動化がノーストップで動く）。次回目安2026-10-13。
+- **2FAコード送信の罠**：ログイン試行（フォーム送信）や`/two_factor/auth`への再アクセス（GETの再読み込み含む）のたびに新しいコードが送信され、直前のコードが無効化される。人間からコードを受け取ってから使うまでの間に余計なページ遷移を挟まないこと（同一ブラウザセッションを維持したまま、ファイル経由でコードを受け渡す等の設計にする）。
+
+### 新設した運用自動化バッチ
+既存の`auto_sync_blogs.py`（新規note投稿・更新追従・Codoc値下げ・購読紐付けの各処理）を土台に、用途別の薄いラッパー3本＋バッチファイルを整備した。ロジックは`auto_sync_blogs.py`側に集約し、3本のスクリプトはCLIパラメータの組み合わせを変えているだけ（保守時は基本的に`auto_sync_blogs.py`側を直す）。
+
+| スクリプト | バッチファイル | 内容 | 頻度目安 |
+|---|---|---|---|
+| `sync_weekly.py` | `週次実行.bat` | note新着記事のみ取り込み→WP新規投稿→Codoc購読プラン紐付け（`sync_new_note_posts`のみ実行） | 週1回 |
+| `sync_monthly_maintenance.py` | `月次メンテ.bat` | 直近4ヶ月（既定120日、`--window-days`で変更可）の内容差分更新（`sync_note_updates`）＋90日経過記事のCodoc自動値下げ（`sync_codoc_discount`） | 月1回 |
+| `backfill_external_blogcards.py` | `全件カード化メンテ.bat` | note全記事（約358件）を対象に、未変換の外部リンク埋め込みを検出しブログカード化＋Codoc再紐付け（下記「外部ブログカード化」参照） | 単発バックフィル。以後は上記2本の通常経路が自動対応するため基本的に再実行不要 |
+
+いずれも引数無し＝ドライラン、`--execute`で本番実行、`--limit N`で試験実行。`auto_sync_blogs.py`本体（引数無しで全処理実行）は今まで通り手動運用の直接実行にも使える。
+
+### WordPress REST API通信の耐障害性強化（`auto_sync_blogs.WP`）
+`sync_codoc_discount`の`wp.get_post()`が`ReadTimeout`で月次メンテナンス全体を停止させる事故が発生した。`WP`クラスの全REST API呼び出しを共通ヘルパー`WP._request()`経由に統一し、(1) タイムアウトを60秒（本文全体を送る`create_post`/`update_post`は90秒）に延長、(2) 通信エラー時に指数バックオフ（3秒→6秒→12秒）で最大3回自動リトライ、(3) `sync_codoc_discount`のループを`try/except/finally`で1件ずつ保護し、リトライしても解消しない失敗はログに記録して次の記事へ続行する設計にした。**新しくWordPress REST APIを呼ぶ処理を追加する際は、`self.session.get/post`を直接呼ばず必ず`self._request()`を経由すること。**
+
+### `sync_codoc_discount`の走査範囲の絞り込みと高速化
+Codocの有料設定（`wp:codoc/codoc-block`）が存在しうるのは「note」カテゴリー記事（約358件）のみで、エキサイトブログ等（約2400件）は対象外であることが確認済みのため、全2810件走査（数十分）をnoteカテゴリーのみ（`fetch_all_wp_posts_with_dates(wp, categories=NOTE_CATEGORY_ID)`）に限定した。さらに、対象記事1件ごとに`wp.get_post()`を個別に呼んでいた本文取得を、WP REST APIの`?include=`パラメータによる一括取得（`fetch_posts_content_by_ids`、100件/リクエスト）に置き換え、実際に値下げを書き込む記事の直後にのみサーバー負荷対策のウェイトを入れる設計にした。結果、実行時間は数十分→**約17秒**に短縮（結果の正しさは変更前と完全一致することを確認済み）。あわせて`fetch_all_wp_posts_with_dates`に`orderby=id&order=asc`を明示し、5項の教訓（同一タイムスタンプ記事のページネーション不安定化）を踏襲した。
+
+### note外部リンクのCocoonブログカード化（`convert_external_article_embeds_to_blogcards`）
+note記事内の外部サイトへのリンクは、note.com側が独自CSSで描画する埋め込みウィジェット（`<figure embedded-service="external-article">`）のままWordPressへ持ち込まれており、Cocoon側に対応CSSが無いため青文字のテキストリンクの羅列にしか見えなかった。`auto_sync_blogs.py`の`fetch_note_body_html()`内でこのウィジェットを検出し、Cocoonのブログカードショートコード`[blogcard url="..."]`へ変換する処理を実装し、新規投稿・更新追従の両経路に組み込んだ。
+
+- **タイトル・説明文の上書き**：Cocoon本体（wp-adminのテーマファイルエディターで`lib/blogcard-out.php`を直接確認して裏取り）は`[blogcard title="..."]`のような別引数を持たず、`url`パラメータのクエリ文字列（`?title=...&snippet=...`）から`get_url_params()`で読み取る仕様。note側ウィジェットが持つタイトル・説明文をこの形式でURLに埋め込み、相手先サーバーのOGP取得失敗時（例: parstoday.ir）でもnote側の正しいタイトル・説明文を表示できるようにした。
+- **踏んだ落とし穴（`&amp;`エスケープ事故）**：本文パイプラインは複数回BeautifulSoupでシリアライズされる（`convert_external_article_embeds_to_blogcards`自身と、後段の`internal_article_links.convert_internal_links`）。前者の中で`&`を実体参照に戻すと、後者の再シリアライズで`&amp;`へ再エスケープされ直し、クエリパラメータが壊れる。対策として、`&`を私用領域文字のセンチネル（`EXTERNAL_BLOGCARD_AMP_SENTINEL`）に退避させたまま`convert_internal_links`まで通過させ、`finalize_external_blogcard_urls()`でパイプラインの**最後**（`wp.create_post`/`wp.update_post`の直前）に一度だけ`&`へ復元する設計にした。**本文パイプラインに新しくBeautifulSoup経由の変換ステージを追加する場合、この最終復元ステップを必ずその後段に置き直すこと。**
+- **既知の限界（未解決）**：外部リンクが多い記事（16件等）では、前方の数件は正常にカード化されるが、後方の一部が完全に空（URLの生表示にすらならない）になる現象を実機で確認した。単体でテストすると成功し、本文の分量を減らすと全件成功することから、大きな記事内でCocoon側のライブOGP取得処理の一部がサイレントに失敗する（原因は本文サイズに連動する何らかの制限と推定されるが、サーバーのPHPエラーログにアクセスできず未特定）ことが分かっている。通常サイズの記事では問題なく機能するため、根本対応（Cocoonのトランジェントキャッシュへの事前書き込み等）は保留中。
+- **バックフィル**：`backfill_external_blogcards.py`で過去のnote記事（約358件）を一括処理。本文更新した記事のみCodoc購読プラン紐付けを再確認する設計（保護方針は次項参照）。
+
+### Codoc購読プラン紐付けを壊す操作の横断的な安全網（`relink_touched_posts`）
+content更新に限らずcategories等の更新だけでもCodoc側の購読プラン紐付けが解除される副作用がある（9/1項参照）。この安全網ロジックを`auto_sync_blogs.relink_touched_posts(wp, log_rows, execute)`として関数化し、`sync_weekly.py`・`sync_monthly_maintenance.py`・`backfill_external_blogcards.py`・`auto_sync_blogs.py`本体の全経路から共通利用する設計にした。**WordPress投稿のcontentやcategoriesを書き換える新しい処理を追加する場合、処理の最後に必ずこの関数（またはCodoc有料記事なら`backfill_codoc_subscription_linkage.process_entry`個別呼び出し）を経由させること。**
 
 ## 👑 順ちゃんAI（副社長エージェント）自律運用ルール
 本プロジェクトでは、Claude Code等は「現場作業員」として動作し、その上位に監視・指揮を行う「順ちゃんAI（副社長）」が常駐しているものとする。人間（社長）が離席・就寝中でも、下記の基準に従って作業を自律継続または安全に一時停止できることを目的とする。`junchan_agent.py`（プロジェクトルート直下に配置。標準ライブラリのみで動作し、外部依存なしでntfyトピック`junchan2026`（アラーム）／`junchan2026-ack`（ACK受付）を使う）がこの「緊急停止・待機」機構の実体。

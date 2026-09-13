@@ -70,7 +70,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -134,6 +134,15 @@ CODOC_BLOCK_PATTERN = re.compile(
 CODOC_TITLE_MAX_LENGTH = 95
 
 REQUEST_DELAY_SECONDS = 1.0
+
+# 【2026-09-13追記：ReadTimeoutによる月次メンテナンス停止事故を受けて】
+# WordPress REST APIへの通信は、サーバー負荷やネットワークの一時的な不調で
+# 30秒では読み切れずタイムアウトすることがある（wp.get_post等）。
+# タイムアウトを延長した上で、通信エラー時は指数バックオフで自動リトライする。
+WP_REQUEST_TIMEOUT = 60          # 通常のGET/POST用
+WP_REQUEST_TIMEOUT_HEAVY = 90    # 本文全体を送るcreate_post/update_post用
+WP_MAX_RETRIES = 3
+WP_RETRY_BACKOFF_BASE_SECONDS = 3  # 1回目失敗後3秒、2回目6秒、3回目12秒待機
 
 
 # ==================== 共通ユーティリティ ====================
@@ -213,23 +222,48 @@ class WP:
         self._category_cache: dict[str, int] = {}
         self._tag_cache: dict[str, int] = {}
 
+    def _request(self, method: str, url: str, raise_for_status: bool = True, **kwargs) -> requests.Response:
+        """通信エラー（タイムアウト・接続断等）時に指数バックオフで最大
+        WP_MAX_RETRIES 回まで自動リトライする共通ヘルパー。全WP REST API呼び出しは
+        これを経由する（2026-09-13追記：ReadTimeoutで月次メンテナンスが停止した
+        事故を受けて導入）。raise_for_status=False を指定すると、レスポンスが
+        返ってきた場合（4xx/5xx含む）はリトライも例外送出もせずそのまま返す
+        （get_or_create_tag のタグ作成時、409/422等の業務エラーを正常系として
+        呼び出し元で判定する既存の挙動を壊さないため）。リトライの対象は
+        あくまで requests.exceptions.RequestException（タイムアウト・接続エラー等の
+        通信そのものの失敗）のみ。
+        """
+        kwargs.setdefault("timeout", WP_REQUEST_TIMEOUT)
+        last_exc: requests.exceptions.RequestException | None = None
+        for attempt in range(1, WP_MAX_RETRIES + 1):
+            try:
+                r = self.session.request(method, url, **kwargs)
+                if raise_for_status:
+                    r.raise_for_status()
+                return r
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+                if attempt >= WP_MAX_RETRIES:
+                    break
+                wait = WP_RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+                print(f"    [リトライ {attempt}/{WP_MAX_RETRIES}] {method} {url} が失敗（{type(e).__name__}: {e}）。{wait}秒待機して再試行します")
+                time.sleep(wait)
+        assert last_exc is not None
+        raise last_exc
+
     def find_post_by_slug(self, slug: str) -> dict | None:
-        r = self.session.get(
-            f"{self.site_url}/wp-json/wp/v2/posts",
+        r = self._request(
+            "GET", f"{self.site_url}/wp-json/wp/v2/posts",
             params={"slug": slug, "status": "publish,future,draft,pending,private,trash", "context": "edit"},
-            timeout=30,
         )
-        r.raise_for_status()
         results = r.json()
         return results[0] if results else None
 
     def get_post(self, post_id: int) -> dict:
-        r = self.session.get(
-            f"{self.site_url}/wp-json/wp/v2/posts/{post_id}",
+        r = self._request(
+            "GET", f"{self.site_url}/wp-json/wp/v2/posts/{post_id}",
             params={"context": "edit"},
-            timeout=30,
         )
-        r.raise_for_status()
         return r.json()
 
     def get_or_create_category(self, name: str) -> int:
@@ -237,19 +271,15 @@ class WP:
             return 1  # Uncategorized
         if name in self._category_cache:
             return self._category_cache[name]
-        r = self.session.get(
-            f"{self.site_url}/wp-json/wp/v2/categories",
-            params={"search": name, "per_page": 100}, timeout=30,
+        r = self._request(
+            "GET", f"{self.site_url}/wp-json/wp/v2/categories",
+            params={"search": name, "per_page": 100},
         )
-        r.raise_for_status()
         for c in r.json():
             if c["name"] == name:
                 self._category_cache[name] = c["id"]
                 return c["id"]
-        r = self.session.post(
-            f"{self.site_url}/wp-json/wp/v2/categories", json={"name": name}, timeout=30,
-        )
-        r.raise_for_status()
+        r = self._request("POST", f"{self.site_url}/wp-json/wp/v2/categories", json={"name": name})
         cat_id = r.json()["id"]
         self._category_cache[name] = cat_id
         return cat_id
@@ -260,17 +290,17 @@ class WP:
             return None
         if name in self._tag_cache:
             return self._tag_cache[name]
-        r = self.session.get(
-            f"{self.site_url}/wp-json/wp/v2/tags",
-            params={"search": name, "per_page": 100}, timeout=30,
+        r = self._request(
+            "GET", f"{self.site_url}/wp-json/wp/v2/tags",
+            params={"search": name, "per_page": 100},
         )
-        r.raise_for_status()
         for t in r.json():
             if t["name"] == name:
                 self._tag_cache[name] = t["id"]
                 return t["id"]
-        r = self.session.post(
-            f"{self.site_url}/wp-json/wp/v2/tags", json={"name": name}, timeout=30,
+        r = self._request(
+            "POST", f"{self.site_url}/wp-json/wp/v2/tags", json={"name": name},
+            raise_for_status=False,
         )
         if r.status_code not in (200, 201):
             return None
@@ -279,25 +309,30 @@ class WP:
         return tag_id
 
     def create_post(self, payload: dict) -> dict:
-        r = self.session.post(f"{self.site_url}/wp-json/wp/v2/posts", json=payload, timeout=60)
-        r.raise_for_status()
+        r = self._request(
+            "POST", f"{self.site_url}/wp-json/wp/v2/posts", json=payload,
+            timeout=WP_REQUEST_TIMEOUT_HEAVY,
+        )
         return r.json()
 
     def update_post(self, post_id: int, payload: dict) -> dict:
-        r = self.session.post(f"{self.site_url}/wp-json/wp/v2/posts/{post_id}", json=payload, timeout=60)
-        r.raise_for_status()
+        r = self._request(
+            "POST", f"{self.site_url}/wp-json/wp/v2/posts/{post_id}", json=payload,
+            timeout=WP_REQUEST_TIMEOUT_HEAVY,
+        )
         return r.json()
 
     def _post_media(self, image_bytes: bytes, content_type: str, filename: str) -> int | None:
         try:
-            r = self.session.post(
-                f"{self.site_url}/wp-json/wp/v2/media",
+            r = self._request(
+                "POST", f"{self.site_url}/wp-json/wp/v2/media",
                 headers={
                     "Content-Disposition": f'attachment; filename="{filename}"',
                     "Content-Type": content_type,
                 },
                 data=image_bytes,
-                timeout=60,
+                timeout=WP_REQUEST_TIMEOUT_HEAVY,
+                raise_for_status=False,
             )
         except requests.RequestException:
             return None
@@ -663,7 +698,8 @@ def fetch_note_body_html(page, url: str) -> str:
     except Exception:
         pass
     html = body_loc.inner_html()
-    return rebuild_note_toc(html)
+    html = rebuild_note_toc(html)
+    return convert_external_article_embeds_to_blogcards(html)
 
 
 def rebuild_note_toc(html: str) -> str:
@@ -682,6 +718,108 @@ def rebuild_note_toc(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     rebuild_toc(soup)
     return str(soup)
+
+
+EXTERNAL_BLOGCARD_AMP_SENTINEL = "AMP"  # 私用領域の文字。本文中の通常テキストと衝突しない
+EXTERNAL_BLOGCARD_TITLE_MAX_LENGTH = 200
+EXTERNAL_BLOGCARD_SNIPPET_MAX_LENGTH = 300
+
+
+def convert_external_article_embeds_to_blogcards(html: str) -> str:
+    """noteの「外部サイトへのリンク埋め込み」（note編集画面でURLをそのまま貼ると
+    生成される <figure embedded-service="external-article">...</figure> ウィジェット）
+    を、Cocoonテーマのブログカードショートコード [blogcard url="..."] に置き換える。
+
+    note.com側はこのウィジェットを自前のCSS（.external-article-widget/
+    .external-article-widget-image 等）でサムネイル付きカードとして描画しているが、
+    そのCSSはnote.com上にしか存在しないため、HTML構造をそのままWordPressへ
+    持ち込んでも当サイト（Cocoon）上ではスタイルが一切当たらず、青文字の
+    テキストリンクが並ぶだけの見た目になってしまう（2026-09-13、実機で確認）。
+
+    【2026-09-13追記：相手先サーバーのOGP取得ブロック対策】
+    Cocoonの外部ブログカード（lib/blogcard-out.php の url_to_external_ogp_blogcard_tag）
+    は、対象URL先へライブでOGP（title/description/image）を取得しに行く方式のため、
+    parstoday.ir等、スクレイピングをブロックするサーバーではタイトル取得に失敗し
+    URLがそのまま表示されてしまう（実機で確認）。wp-adminのテーマファイル
+    エディター経由でCocoon本体のソースを直接確認したところ、
+    url_to_external_ogp_blogcard_tag() は `get_url_params($url)` で**URL自身の
+    クエリ文字列から`title`/`snippet`パラメータを読み取り、値があれば
+    OGP取得結果より優先して使う**仕様であることが判明した
+    （shortcode_atts自体はurlしか受け付けない＝[blogcard title="..."]という
+    別引数の形では効かないため注意。あくまで url= に渡す値自体へ
+    ?title=...&snippet=... を埋め込む必要がある）。noteの埋め込みウィジェットは
+    タイトル（.external-article-widget-title）・説明文
+    （.external-article-widget-description）を既に保持しているため、これらを
+    そのままCocoonへの事前ヒントとして渡すことで、相手先サーバーの可用性に
+    左右されず常に正しいタイトル・説明文を表示できる（サムネイル画像は
+    Cocoon側にurlパラメータでの上書き機構が無いため、ライブ取得のフォールバック
+    に委ねる＝取得できなければ「no-image」表示のまま。507対策としては
+    エラー文字列が露出しないことが重要であり、Cocoon側は取得失敗時に
+    URLをそのまま出す非破壊フォールバックのため、CLAUDE.md 7項の方針にも反しない）。
+
+    urlencode()で通常のURLエンコードを行うため、title/snippetに含まれる
+    `&`や`"`等の特殊文字も安全に一つのクエリ文字列へ格納できる。ただし
+    urlencode後の文字列にも区切り文字としての生の`&`が含まれるため、そのまま
+    BeautifulSoupの文字列ノードとして挿入すると`&`が`&amp;`にHTMLエスケープ
+    され、Cocoon側のクエリパース時に`&amp;snippet=...`という壊れたキー名に
+    なってしまう。他の本文中の正当な`&amp;`（例:"AT&T"等）まで巻き込んで
+    無差別に戻すと事故るため、生成した`&`だけを私用領域文字のセンチネルに
+    退避させ、BeautifulSoupでのシリアライズ完了後にセンチネルだけを`&`へ
+    戻す（対象を限定した安全な置換）。
+
+    note.com自身の過去記事への埋め込み（embedded-service="note"）は対象外
+    （internal_article_links.py が別途、自サイト内部リンク専用のカードに変換する。
+    そちらは埋め込みのiframeがnote.comへ遷移してしまう問題への対応であり、
+    本関数とは対象・目的が異なる）。
+    """
+    if 'embedded-service="external-article"' not in html:
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    changed = False
+    for figure in soup.find_all("figure", attrs={"embedded-service": "external-article"}):
+        url = (figure.get("data-src") or "").strip()
+        if not url:
+            a = figure.find("a", href=True)
+            url = a["href"].strip() if a else ""
+        if not url:
+            continue  # URLが取れない場合は安全側に倒し、元のウィジェットをそのまま残す
+
+        title_el = figure.find(class_="external-article-widget-title")
+        desc_el = figure.find(class_="external-article-widget-description")
+        title = (title_el.get_text(strip=True) if title_el else "")[:EXTERNAL_BLOGCARD_TITLE_MAX_LENGTH]
+        snippet = (desc_el.get_text(strip=True) if desc_el else "")[:EXTERNAL_BLOGCARD_SNIPPET_MAX_LENGTH]
+
+        card_url = url
+        extra_params = [(k, v) for k, v in (("title", title), ("snippet", snippet)) if v]
+        if extra_params:
+            parts = urlsplit(url)
+            query_pairs = parse_qsl(parts.query, keep_blank_values=True) + extra_params
+            new_query = urlencode(query_pairs).replace("&", EXTERNAL_BLOGCARD_AMP_SENTINEL)
+            card_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+
+        shortcode_p = soup.new_tag("p")
+        shortcode_p.string = f'[blogcard url="{card_url}"]'
+        figure.replace_with(shortcode_p)
+        changed = True
+    if not changed:
+        return html
+    # 【重要】ここではセンチネルを"&"へ戻さない。この関数の戻り値は、後段の
+    # convert_internal_links() で再度BeautifulSoupにより解析・シリアライズ
+    # されるため、ここで"&"に戻すと今度はそちらの再シリアライズ時に
+    # 改めて"&amp;"へエスケープされ直してしまう（実機で確認済みの事故）。
+    # センチネルのままパイプライン全体を通過させ、WordPressへ送信する直前
+    # （finalize_external_blogcard_urls）で最後に一度だけ戻す。
+    return str(soup)
+
+
+def finalize_external_blogcard_urls(content: str) -> str:
+    """convert_external_article_embeds_to_blogcards が退避させたセンチネルを
+    実際の"&"へ戻す。本文の加工が完全に終わり、WordPressへ送信する直前
+    （wp.create_post / wp.update_post の直前）で必ず最後に1回だけ呼ぶこと。
+    途中に convert_internal_links 等、追加でBeautifulSoupのシリアライズを
+    挟む処理を新設した場合、その後段で必ずこれを呼び直す必要がある。
+    """
+    return content.replace(EXTERNAL_BLOGCARD_AMP_SENTINEL, "&")
 
 
 def sync_new_note_posts(
@@ -745,6 +883,7 @@ def sync_new_note_posts(
                     # 本文中のnote/exblog過去記事リンクをサイト内リンクに変換する（赤枠は対象外）。
                     note_map, exblog_map = link_maps
                     content, _ = convert_internal_links(content, note_map, exblog_map)
+                    content = finalize_external_blogcard_urls(content)
                     error_markers = find_error_text_markers(content)
                     if error_markers:
                         raise RuntimeError(f"本文にサーバーエラー文字列が混入: {error_markers}")
@@ -991,9 +1130,15 @@ def sync_note_updates(
     limit: int | None,
     link_maps: tuple[dict, dict],
     force_keys: set[str] | None = None,
+    window_days: int | None = None,
 ) -> list[dict]:
+    # 【2026-09-13追記】月次メンテナンス（sync_monthly_maintenance.py）から
+    # 「直近4ヶ月」等、週次の既定値（NOTE_UPDATE_WINDOW_DAYS=30日）より広い
+    # ウィンドウで呼び出せるようにパラメータ化した。省略時は従来通り既定値を使う。
+    window_days = NOTE_UPDATE_WINDOW_DAYS if window_days is None else window_days
+
     print("\n" + "=" * 60)
-    print(f"【3】note記事の更新追従（公開から{NOTE_UPDATE_WINDOW_DAYS}日以内）")
+    print(f"【3】note記事の更新追従（公開から{window_days}日以内）")
     print("=" * 60)
 
     force_keys = force_keys or set()
@@ -1003,7 +1148,7 @@ def sync_note_updates(
     for a in articles:
         if a["key"] in force_keys:
             # 【2026-09-09追記：即時更新の強制指定】--key で明示された記事は、
-            # 30日ウィンドウの対象外（古い記事の後追い修正等）であっても必ず含める。
+            # ウィンドウの対象外（古い記事の後追い修正等）であっても必ず含める。
             recent.append(a)
             continue
         if not a["publish_at"]:
@@ -1012,9 +1157,9 @@ def sync_note_updates(
             pub_dt = datetime.strptime(a["publish_at"][:19], "%Y-%m-%dT%H:%M:%S")
         except ValueError:
             continue
-        if (now - pub_dt).days <= NOTE_UPDATE_WINDOW_DAYS:
+        if (now - pub_dt).days <= window_days:
             recent.append(a)
-    print(f"公開から{NOTE_UPDATE_WINDOW_DAYS}日以内のnote記事: {len(recent)}件"
+    print(f"公開から{window_days}日以内のnote記事: {len(recent)}件"
           + (f"（うち強制指定: {len(force_keys)}件）" if force_keys else ""))
 
     if limit:
@@ -1088,6 +1233,7 @@ def sync_note_updates(
                     content = insert_full_title_box(content, a["title"])
                     note_map, exblog_map = link_maps
                     content, _ = convert_internal_links(content, note_map, exblog_map)
+                    content = finalize_external_blogcard_urls(content)
                     error_markers = find_error_text_markers(content)
                     if error_markers:
                         raise RuntimeError(f"本文にサーバーエラー文字列が混入: {error_markers}")
@@ -1151,18 +1297,40 @@ def sync_note_updates(
 
 # ==================== 4. Codoc自動値下げ（90日経過） ====================
 
-def fetch_all_wp_posts_with_dates(wp: WP) -> list[dict]:
+def fetch_all_wp_posts_with_dates(wp: WP, categories: int | None = None) -> list[dict]:
+    """全件（または指定カテゴリーのみ）の投稿をid/slug/date/titleだけ軽量取得する。
+
+    2026-09-13追記：sync_codoc_discount専用に categories 引数を追加した。
+    Codocの有料設定（[[codoc/codoc-block]]）が存在しうるのはnoteカテゴリー
+    （NOTE_CATEGORY_ID）記事約358件のみで、エキサイトブログ等の残り約2400件を
+    毎回全件走査するのは無駄な負荷・実行時間（数十分）を生んでいた
+    （実機で確認：値下げ対象の絞り込みそのものはこの関数の後段で
+    codocブロックの有無を個別確認しているため、走査母数を減らしても
+    正しさは変わらず、単に無駄な母数を削るだけ）。
+
+    また、5項（CLAUDE.md）で確立した教訓に従い、明示的に
+    orderby=id&order=asc を指定して安定したページネーションを保証する
+    （既定のdate DESC順は、同一タイムスタンプの一括移行記事が多いこの
+    サイトではページ間の重複・欠落を引き起こす既知の不具合パターン）。
+    """
     posts = []
     page = 1
+    params = {
+        "per_page": 100,
+        "status": "publish,future,draft,pending,private",
+        "context": "edit", "_fields": "id,slug,date,title",
+        "orderby": "id", "order": "asc",
+    }
+    if categories:
+        params["categories"] = categories
     while True:
-        r = wp.session.get(
-            f"{wp.site_url}/wp-json/wp/v2/posts",
-            params={
-                "per_page": 100, "page": page,
-                "status": "publish,future,draft,pending,private",
-                "context": "edit", "_fields": "id,slug,date,title",
-            },
-            timeout=30,
+        # 2026-09-13追記：全件（数千件規模）を数十ページに分けて取得するため、
+        # 1ページのタイムアウトでも巻き込まれてクラッシュしないよう
+        # wp._request（リトライ＋タイムアウト延長つき）経由に統一した。
+        r = wp._request(
+            "GET", f"{wp.site_url}/wp-json/wp/v2/posts",
+            params={**params, "page": page},
+            raise_for_status=False,
         )
         if r.status_code == 400:
             break
@@ -1175,7 +1343,37 @@ def fetch_all_wp_posts_with_dates(wp: WP) -> list[dict]:
         if page >= total_pages:
             break
         page += 1
+        time.sleep(0.3)
     return posts
+
+
+def fetch_posts_content_by_ids(wp: WP, ids: list[int]) -> dict[int, str]:
+    """指定したID群の投稿本文（content.raw）を、100件ずつの一括取得（WP REST APIの
+    ?include= パラメータ）でまとめて取得する。
+
+    2026-09-13追記：sync_codoc_discountが対象記事1件ごとにwp.get_post()を
+    個別に呼んでいたため、noteカテゴリー358件へ走査対象を絞った後も
+    294件の個別リクエスト＋1秒間隔のウェイトで6分半かかっていた
+    （実機で確認）。本文はそもそも一括取得できるフィールドのため、
+    100件ずつ最大でも4リクエストにまとめることで、同じ情報量を
+    大幅に少ないリクエスト数で取得しサーバー負荷・実行時間の両方を削減する。
+    """
+    content_by_id: dict[int, str] = {}
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i + 100]
+        r = wp._request(
+            "GET", f"{wp.site_url}/wp-json/wp/v2/posts",
+            params={
+                "include": ",".join(str(x) for x in chunk),
+                "per_page": 100, "context": "edit",
+                "_fields": "id,content",
+            },
+        )
+        for item in r.json():
+            content_by_id[item["id"]] = item.get("content", {}).get("raw", "") or ""
+        if i + 100 < len(ids):
+            time.sleep(0.3)
+    return content_by_id
 
 
 def sync_codoc_discount(wp: WP, execute: bool, limit: int | None) -> list[dict]:
@@ -1183,7 +1381,11 @@ def sync_codoc_discount(wp: WP, execute: bool, limit: int | None) -> list[dict]:
     print(f"【4】Codoc自動値下げ（投稿から{CODOC_DISCOUNT_AFTER_DAYS}日以上経過 かつ 価格>{CODOC_DISCOUNT_PRICE}円）")
     print("=" * 60)
 
-    posts = fetch_all_wp_posts_with_dates(wp)
+    # 2026-09-13追記：Codocの有料設定（wp:codoc/codoc-block）が存在しうるのは
+    # noteカテゴリー記事（約358件）のみで、エキサイトブログ等（約2400件）は
+    # そもそも対象外であることが確認済みのため、走査母数をnoteカテゴリーのみに
+    # 限定し、全2810件規模の無駄な走査（数十分）を避ける。
+    posts = fetch_all_wp_posts_with_dates(wp, categories=NOTE_CATEGORY_ID)
     now = datetime.now()
     cutoff = now - timedelta(days=CODOC_DISCOUNT_AFTER_DAYS)
 
@@ -1195,30 +1397,41 @@ def sync_codoc_discount(wp: WP, execute: bool, limit: int | None) -> list[dict]:
             continue
         if post_dt <= cutoff:
             old_posts.append(p)
-    print(f"全記事: {len(posts)}件 / 投稿から{CODOC_DISCOUNT_AFTER_DAYS}日以上経過: {len(old_posts)}件（Codocブロックの有無はこれから個別確認）")
+    print(f"noteカテゴリー記事: {len(posts)}件 / 投稿から{CODOC_DISCOUNT_AFTER_DAYS}日以上経過: {len(old_posts)}件（Codocブロックの有無はこれから個別確認）")
 
     if limit:
         old_posts = old_posts[:limit]
 
+    # 2026-09-13追記：本文はここで一括取得する（fetch_posts_content_by_ids参照）。
+    # 以降のループは基本的にネットワーク往復なしでメモリ上のcontentを見るだけになるため、
+    # 実際にwp.update_post()で書き込みが発生する記事以外ではREQUEST_DELAY_SECONDSの
+    # ウェイトも不要（＝大半の記事は待たずに次へ進む）。
+    content_by_id = fetch_posts_content_by_ids(wp, [p["id"] for p in old_posts])
+
     log_rows = []
     for i, p in enumerate(old_posts, start=1):
         title = p["title"]["raw"] if isinstance(p.get("title"), dict) else str(p.get("title", ""))
-        full = wp.get_post(p["id"])
-        content = full.get("content", {}).get("raw", "") or ""
-        price = extract_codoc_price(content)
-        if price is None or price <= CODOC_DISCOUNT_PRICE:
-            continue
-
-        print(f"[{i}/{len(old_posts)}] id={p['id']} price={price}円 -> {CODOC_DISCOUNT_PRICE}円  {title[:40]}")
-        if not execute:
-            log_rows.append(log_row("discount_codoc", p["id"], p["slug"], title, "dry_run_would_discount", f"{price}->{CODOC_DISCOUNT_PRICE}"))
-            continue
-
-        new_content = replace_codoc_price(content, CODOC_DISCOUNT_PRICE)
-        if new_content is None:
-            log_rows.append(log_row("discount_codoc", p["id"], p["slug"], title, "failed", "codoc block parse error"))
-            continue
+        wrote = False
+        # 2026-09-13追記：本文解析やwp.update_post（ReadTimeout等）で1件失敗しても
+        # スクリプト全体を停止させず、失敗をログに記録して次の記事へ進める。
+        # wp._request 側で最大3回まで自動リトライ済みのため、ここに到達する
+        # RequestExceptionは「リトライしても解消しなかった」ケースのみ。
         try:
+            content = content_by_id.get(p["id"], "")
+            price = extract_codoc_price(content)
+            if price is None or price <= CODOC_DISCOUNT_PRICE:
+                continue
+
+            print(f"[{i}/{len(old_posts)}] id={p['id']} price={price}円 -> {CODOC_DISCOUNT_PRICE}円  {title[:40]}")
+            if not execute:
+                log_rows.append(log_row("discount_codoc", p["id"], p["slug"], title, "dry_run_would_discount", f"{price}->{CODOC_DISCOUNT_PRICE}"))
+                continue
+
+            new_content = replace_codoc_price(content, CODOC_DISCOUNT_PRICE)
+            if new_content is None:
+                log_rows.append(log_row("discount_codoc", p["id"], p["slug"], title, "failed", "codoc block parse error"))
+                continue
+
             # 値下げ前の元価格を codoc_price_before_discount へ保存する。
             # アーカイブ割引ボックス（note-style-engagement.php の
             # prepend_archive_discount_box）が「note定価◯円から」の比較文言を
@@ -1235,14 +1448,72 @@ def sync_codoc_discount(wp: WP, execute: bool, limit: int | None) -> list[dict]:
                     "codoc_cache_updated_at": int(time.time()),
                 },
             })
+            wrote = True
             print("    [OK] 値下げしました")
             log_rows.append(log_row("discount_codoc", p["id"], p["slug"], title, "success", f"{price}->{CODOC_DISCOUNT_PRICE}"))
         except requests.RequestException as e:
-            print(f"    [失敗] {e}")
-            log_rows.append(log_row("discount_codoc", p["id"], p["slug"], title, "failed", str(e)))
-        time.sleep(REQUEST_DELAY_SECONDS)
+            print(f"    [失敗] id={p['id']}: 通信エラー（{type(e).__name__}: {e}）。次の記事へ続行します")
+            log_rows.append(log_row("discount_codoc", p["id"], p.get("slug", ""), title, "failed", str(e)))
+        except Exception as e:
+            print(f"    [失敗] id={p['id']}: {e}")
+            log_rows.append(log_row("discount_codoc", p["id"], p.get("slug", ""), title, "failed", str(e)))
+        finally:
+            # 実際にwp.update_post()を呼んだ記事の直後だけウェイトを入れる
+            # （本文はすでに一括取得済みのため、対象外の記事ではネットワーク
+            # 往復自体が発生せず、待つ理由がない）。
+            if wrote:
+                time.sleep(REQUEST_DELAY_SECONDS)
 
     return log_rows
+
+
+def relink_touched_posts(wp: WP, log_rows: list[dict], execute: bool) -> None:
+    """【2026-09-02追記→2026-09-13関数化】content更新に限らずcategories等の更新
+    だけでもCodoc側の購読プラン紐付けが解除される副作用が確認されている
+    （backfill_internal_links.py・categorize_articles_ai.py のdocstring参照）。
+    個別関数ごとに再紐付け処理を書き込む方式は書き漏れのリスクが常に残るため、
+    今回実際にWordPress側が更新された投稿（success系の結果を持つ行）を
+    横断的に集約し、Codoc有料記事であれば最後に一括で再紐付けを確認する。
+    sync_new_note_posts / sync_note_updates は既に個別に再紐付け済みだが、
+    二重実行しても process_entry は冪等（既にlinked済みならスキップ）なので
+    無害。sync_codoc_discount 等、個別対応していない経路の取りこぼしを
+    ここで一括して拾う。
+
+    元は main() 内に直書きされていたが、sync_weekly.py / sync_monthly_maintenance.py
+    からも同じ安全網を再利用したいため独立関数化した（動作は変更なし）。
+    """
+    if not execute:
+        return
+    touched_ids = sorted({
+        row["post_id"] for row in log_rows
+        if row.get("post_id") and row.get("result") == "success"
+    })
+    if not touched_ids:
+        return
+    print("\n" + "=" * 60)
+    print(f"Codoc購読プラン紐付けの横断チェック（今回更新した{len(touched_ids)}件）")
+    print("=" * 60)
+    from backfill_codoc_subscription_linkage import process_entry as relink_codoc_subscription
+    from playwright.sync_api import sync_playwright as _sync_playwright
+    with _sync_playwright() as pw:
+        context, page = get_note_browser_page(pw, headless=True)
+        try:
+            for pid in touched_ids:
+                try:
+                    fresh = wp.get_post(pid)
+                    entry_code = (fresh.get("meta") or {}).get("codoc_entry_code")
+                except Exception as e:
+                    print(f"  id={pid}: [警告] 取得失敗 {e}")
+                    continue
+                if not entry_code:
+                    continue
+                try:
+                    result = relink_codoc_subscription(page, entry_code, True)
+                    print(f"  id={pid} entry_code={entry_code} -> {result['status']}")
+                except Exception as e:
+                    print(f"  id={pid} entry_code={entry_code}: [警告] 再紐付け失敗 {e}")
+        finally:
+            context.close()
 
 
 # ==================== メイン ====================
@@ -1304,46 +1575,9 @@ def main() -> None:
     if args.only in (None, "discount-codoc"):
         all_log_rows += sync_codoc_discount(wp, args.execute, args.limit)
 
-    # 【2026-09-02追記：横断的な安全網】content更新に限らずcategories等の更新
-    # だけでもCodoc側の購読プラン紐付けが解除される副作用が確認されている
-    # （backfill_internal_links.py・categorize_articles_ai.py のdocstring参照）。
-    # 個別関数ごとに再紐付け処理を書き込む方式は書き漏れのリスクが常に残るため、
-    # ここで today 実際に post_id が更新された投稿（success系の結果を持つ行）を
-    # 横断的に集約し、Codoc有料記事であれば最後に一括で再紐付けを確認する。
-    # sync_new_note_posts / sync_note_updates は既に個別に再紐付け済みだが、
-    # 二重実行しても process_entry は冪等（既にlinked済みならスキップ）なので
-    # 無害。sync_codoc_discount 等、個別対応していない経路の取りこぼしを
-    # ここで一括して拾う。
-    if args.execute:
-        touched_ids = sorted({
-            row["post_id"] for row in all_log_rows
-            if row.get("post_id") and row.get("result") == "success"
-        })
-        if touched_ids:
-            print("\n" + "=" * 60)
-            print(f"【5】Codoc購読プラン紐付けの横断チェック（本日更新した{len(touched_ids)}件）")
-            print("=" * 60)
-            from backfill_codoc_subscription_linkage import process_entry as relink_codoc_subscription
-            from playwright.sync_api import sync_playwright as _sync_playwright
-            with _sync_playwright() as pw:
-                context, page = get_note_browser_page(pw, headless=True)
-                try:
-                    for pid in touched_ids:
-                        try:
-                            fresh = wp.get_post(pid)
-                            entry_code = (fresh.get("meta") or {}).get("codoc_entry_code")
-                        except Exception as e:
-                            print(f"  id={pid}: [警告] 取得失敗 {e}")
-                            continue
-                        if not entry_code:
-                            continue
-                        try:
-                            result = relink_codoc_subscription(page, entry_code, True)
-                            print(f"  id={pid} entry_code={entry_code} -> {result['status']}")
-                        except Exception as e:
-                            print(f"  id={pid} entry_code={entry_code}: [警告] 再紐付け失敗 {e}")
-                finally:
-                    context.close()
+    print("\n" + "=" * 60)
+    print("【5】Codoc購読プラン紐付けの横断チェック")
+    relink_touched_posts(wp, all_log_rows, args.execute)
 
     # 【2026-09-09追記：サイドバー「キーワードから探す（50音順）」の自動最新化】
     # note記事の新規投稿・更新追従（タグ同期を含む）でWordPressのタグ

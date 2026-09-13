@@ -127,9 +127,45 @@ def append_log(rows: list[dict]) -> None:
             writer.writerow(row)
 
 
+def ensure_logged_in(page) -> bool:
+    """Codocのセッションが切れてログイン画面へリダイレクトされていた場合、
+    Chromeの永続プロファイルに保存済みの自動入力済み認証情報でログインし直す。
+    2026-08-30、新規note記事8件中5件で発生した checkbox_not_found の真因が
+    「UI変更やタイミングではなくセッション切れでログイン画面にいた」ことだった
+    ため追加。新しい資格情報を入力するのではなく、既にブラウザが自動入力した
+    フィールドの値を使ってログインボタンを押すだけなので機密情報を扱わない。
+
+    2026-09-13追記：Codoc側に二段階認証（メール宛6桁コード）が新たに導入され、
+    ログインボタン押下後に /two_factor/auth へ遷移するケースが発生することを
+    確認した。旧実装は「URLに/loginを含まない＝ログイン成功」という判定だった
+    ため、2FA待ちpage（/two_factor/authもURLに/loginを含まない）を誤って
+    「ログイン成功」と誤判定し、その後のcheckbox探索が必ずcheckbox_not_found
+    になるバグがあった。2FAコードの自動入力はできない（メール受信者本人しか
+    読めない）ため、2FA待ちを検知した場合は明示的にlogin_failedとして扱い、
+    人間が事前に一度だけ手動でこのブラウザプロファイルを認証・信頼済み
+    （「このデバイスを30日間信頼する」）にしておく運用を前提とする。
+    """
+    if "/two_factor" in page.url:
+        return False
+    if "/login" not in page.url:
+        return True
+    login_btn = page.locator('button:has-text("ログイン")').first
+    if login_btn.count() == 0:
+        return False
+    login_btn.click()
+    page.wait_for_load_state("load", timeout=30000)
+    page.wait_for_timeout(1200)
+    if "/two_factor" in page.url:
+        return False
+    return "/login" not in page.url
+
+
 def process_entry(page, entry_code: str, execute: bool) -> dict:
     page.goto(f"https://codoc.jp/me/entries/{entry_code}/edit", wait_until="load", timeout=30000)
     page.wait_for_timeout(900)
+
+    if not ensure_logged_in(page):
+        return {"status": "login_failed"}
 
     sub_cb = page.locator('input[name="subscriptions[]"][value="' + PLAN_VALUE + '"]')
     if sub_cb.count() == 0:
@@ -169,6 +205,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--recheck-all",
+        action="store_true",
+        help=(
+            "進捗ファイルのキャッシュ（already_linked/linked_and_verified）を無視し、"
+            "全件をCodoc側で再確認する。2026-09-01判明: WordPress投稿のcontentを"
+            "REST APIで更新すると、Codoc側の購読プラン紐付けチェックボックスが"
+            "サイレントに解除される副作用があることが確認された（内部リンク一括"
+            "変換等でcontentを更新した記事で、紐付け済みだったはずの記事が軒並み"
+            "解除されていた）。進捗ファイルは「一度linkedと確認した」過去の事実を"
+            "記録しているに過ぎず、その後のcontent更新で覆っている可能性があるため、"
+            "content更新系スクリプトを実行した後は必ずこのフラグ付きで再監査すること。"
+        ),
+    )
     args = parser.parse_args()
 
     creds = load_credentials()
@@ -176,8 +226,12 @@ def main():
     print(f"WordPress側の有料記事（codoc_entry_code保持）: {len(paid_posts)}件")
 
     progress = load_progress()
-    pending = [p for p in paid_posts if p["entry_code"] not in progress or progress[p["entry_code"]].get("status") not in ("already_linked", "linked_and_verified")]
-    print(f"未処理・要再確認: {len(pending)}件（進捗ファイルから{len(paid_posts) - len(pending)}件をスキップ）")
+    if args.recheck_all:
+        pending = paid_posts
+        print("--recheck-all: 進捗ファイルのキャッシュを無視し、全件を再確認します")
+    else:
+        pending = [p for p in paid_posts if p["entry_code"] not in progress or progress[p["entry_code"]].get("status") not in ("already_linked", "linked_and_verified")]
+        print(f"未処理・要再確認: {len(pending)}件（進捗ファイルから{len(paid_posts) - len(pending)}件をスキップ）")
 
     if args.limit:
         pending = pending[: args.limit]
