@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.1.0
+ * Version: 4.4.0
  * Author: junchan-world
  */
 
@@ -15,6 +15,9 @@ class Note_Style_Engagement_Bar {
     // 'like_count' は note.com インポート時に既に使われている別のメタキー
     // （note本家側のスキ数）と衝突するため、専用の名前空間付きキーを使う。
     const LIKE_META_KEY = 'nseb_like_count';
+    // 【2026-09-02追記】一覧の「閲覧数(PV)順」ソート専用のキャッシュ
+    // （PV_SORT_CACHE_KEYのコメント・handle_view参照）。
+    const PV_SORT_CACHE_KEY = 'nseb_pv_sort_cache';
     const SIDEBAR_SUBSCRIPTION_WIDGET_ID = 'custom_html-2';
     const CONTENT_SUBSCRIPTION_DOM_ID = 'codoc-subscription-oEplngWcvQ';
 
@@ -260,6 +263,43 @@ class Note_Style_Engagement_Bar {
             'callback' => array($this, 'handle_view'),
             'permission_callback' => '__return_true',
         ));
+        // 【2026-09-02追記】PV順ソート導入時の初期キャッシュ一括投入用。
+        // 管理者権限が必要（アプリケーションパスワード認証でも
+        // current_user_can('manage_options')は正しく機能する）。冪等なので
+        // 何度実行しても安全（get_all_pv()の最新値で毎回上書きするだけ）。
+        register_rest_route('engage/v1', '/admin/backfill-pv-cache', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'handle_backfill_pv_cache'),
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+        ));
+    }
+
+    public function handle_backfill_pv_cache($request) {
+        $paged = max(1, (int) $request->get_param('page'));
+        $per_page = 200;
+        $query = new WP_Query(array(
+            'post_type' => 'post',
+            'post_status' => 'publish',
+            'posts_per_page' => $per_page,
+            'paged' => $paged,
+            'orderby' => 'ID',
+            'order' => 'ASC',
+            'fields' => 'ids',
+        ));
+        $updated = 0;
+        foreach ($query->posts as $post_id) {
+            $pv = $this->get_cocoon_pv_breakdown($post_id);
+            update_post_meta($post_id, self::PV_SORT_CACHE_KEY, (int) $pv['all']);
+            $updated++;
+        }
+        return array(
+            'page' => $paged,
+            'updated' => $updated,
+            'max_pages' => (int) $query->max_num_pages,
+            'found_posts' => (int) $query->found_posts,
+        );
     }
 
     /**
@@ -337,7 +377,17 @@ class Note_Style_Engagement_Bar {
         // フロントエンドの描画関数をそのまま共有できるようにする
         // （価格・購入数もこの応答に含まれ、直後のcard-data応答より新しい
         // ＝優先して使われる。initStatusBarのマージ処理を参照）。
-        return $this->get_card_badge_data($post_id);
+        $data = $this->get_card_badge_data($post_id);
+        // 【2026-09-02追記：PV順ソート対応】Cocoon純正のPVはwp_cocoon_accesses
+        // テーブル集計のライブ計算のため、WP_Queryのmeta_value_numでの
+        // 直接ソートができない。記事詳細ページを開くたび（＝PVが実際に
+        // 加算されるタイミング）に全体PVをpostmetaへキャッシュしておき、
+        // 一覧の「閲覧数順」ソート（custom-search-filter.php側）はこの
+        // キャッシュ値を使う。一覧ページ（card-data）表示のたびに書き込むと
+        // 書き込み量が過大になるため、詳細ページ閲覧時のみ更新する
+        // （Codoc価格のライブ更新と同じ設計判断）。
+        update_post_meta($post_id, self::PV_SORT_CACHE_KEY, (int) $data['view_count']);
+        return $data;
     }
 
     public function handle_card_data($request) {
@@ -686,6 +736,39 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     try { window.localStorage.setItem(PURCHASED_KEY, JSON.stringify(arr)); } catch (e) {}
   }
   function isPurchased(postId) { return getPurchasedSet().indexOf(postId) !== -1; }
+  // 【2026-09-01追記】checkCodocPurchaseStateが「この記事は今ロックされている」
+  // という直接証拠（codocLiveVerdict参照）を得た際、以前の判定で誤って
+  // 立ってしまっていた購入済みフラグを取り除くための関数。
+  function removePurchased(postId) {
+    var set = getPurchasedSet();
+    var idx = set.indexOf(postId);
+    if (idx !== -1) {
+      set.splice(idx, 1);
+      savePurchasedSet(set);
+    }
+  }
+  // 【2026-09-01追記：記事個別のCodocウィジェット直接観測結果】
+  // postId(number) -> true(このセッションでウィジェットの描画完了後、実際に
+  // ロック解除を確認した) / false(描画完了後もロックされたままだった) / undefined
+  // (まだこのブラウザでこの記事の詳細ページを開いておらず、直接証拠が無い)。
+  // 一覧カードにはCodocウィジェット自体が存在しないため、この直接証拠は
+  // 記事の詳細ページを実際に開いた場合にのみ得られる。
+  var codocLiveVerdict = {};
+  // 【背景】WordPress側でCodoc有料記事に「購読プラン紐付け（subscriptions[]
+  // チェックボックス）」を設定しても、Codoc側の何らかの理由（原因は
+  // backfill_codoc_subscription_linkage.py のdocstring参照）で個別の記事だけ
+  // 紐付けが解除されていることがあり、その場合はサブスク加入者であっても
+  // その記事だけはCodoc側で実際にロック解除されない。この状態で、古い
+  // グローバルな「サブスク加入者」推定フラグ（isActiveSubscriber）だけを
+  // 根拠に「読み放題」バッジを出すと、詳細ページを開いた瞬間に同じ画面内で
+  // 「バッジは読み放題なのに、その下のウィジェットはペイウォールを要求する」
+  // という自己矛盾した表示になる（実機で報告・確認済みの不具合）。
+  // この記事のウィジェットを直接観測できている場合は、その直接証拠を
+  // 古いグローバル推定より優先する。
+  function subscriberAppliesTo(postId) {
+    if (codocLiveVerdict[postId] === false) { return false; }
+    return isActiveSubscriber();
+  }
   function markPurchased(postId) {
     var set = getPurchasedSet();
     if (set.indexOf(postId) === -1) {
@@ -710,7 +793,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   // 場合は、この記事個別の購入済みフラグが立っていなくても常に購入済み扱いにする
   // （サブスク加入者は全有料記事を読める、というサイト側の実際の権限設計に合わせる）。
   function effectivePurchased(postId) {
-    return isActiveSubscriber() || isPurchased(postId);
+    return isPurchased(postId) || subscriberAppliesTo(postId);
   }
 
   // 【2026-08-26 追記：購入済みバッジの表示ロジックを一本化】以前は「色だけ
@@ -737,16 +820,25 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   // purchasedCountがnull/undefined（＝Codocエントリー自体が無い＝無料記事）
   // の場合は、individuallyPurchased/isSubscriberの値に関わらず常に非表示にする
   // （サブスクは有料記事を読み放題にする権利であって無料記事とは無関係なため）。
+  // 【2026-09-01追記：優先順位を反転】以前は「個別購入の検出」を「サブスク加入」
+  // より優先していたが、checkCodocPurchaseStateのDOM観測（.codoc-buy-wrapが
+  // 消えている等）は「個別購入」と「サブスクによる読み放題アクセス」を区別
+  // できない（どちらも同じDOM結果になる）。そのため、サブスク加入者と推定
+  // できている読者が実際にはサブスクで読んだだけの記事まで「🛒購入済み」と
+  // 表示してしまい、「一覧では読み放題だったのに読んだら購入済みに変わった」
+  // という混乱を招く不具合が実機で報告された。サブスク加入者であることが
+  // 分かっている場合は、個別購入の検出よりも「読み放題」を優先して表示する
+  // （サブスク加入者がわざわざ同じ記事を個別購入している方が稀なケースのため）。
   function computeAccessBadgeState(purchasedCount, individuallyPurchased, isSubscriber) {
     var isPaidArticle = purchasedCount !== null && typeof purchasedCount !== 'undefined';
     if (!isPaidArticle) {
       return { show: false, mode: null };
     }
-    if (individuallyPurchased) {
-      return { show: true, mode: 'purchased' };
-    }
     if (isSubscriber) {
       return { show: true, mode: 'readfree' };
+    }
+    if (individuallyPurchased) {
+      return { show: true, mode: 'purchased' };
     }
     return { show: purchasedCount >= 1, mode: 'count' };
   }
@@ -829,7 +921,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   // （cms.js、defer属性）で非同期にDOMを書き換えるため、単純に一度だけ
   // チェックするのではなくMutationObserverで監視し、初回描画・購入完了後の
   // 動的な変化のどちらも取りこぼさないようにする。
-  function checkCodocPurchaseState(postId) {
+  function checkCodocPurchaseState(postId, onVerdict) {
     var container = document.querySelector('.wp-block-codoc-codoc-block');
     if (!container) { return; } // 無料記事、またはCodocブロックが無いページ
 
@@ -880,6 +972,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
       var hasUnlockedBody = !!(bodyAfterEl && bodyAfterEl.textContent && bodyAfterEl.textContent.trim().length > 0);
 
       if (buyWrapHidden || hasUser || hasUnlockedBody) {
+        codocLiveVerdict[postId] = true;
         markPurchased(postId);
         hideUpsellBanners();
         // 【2026-08-26追記】このブラウザが異なる記事を複数（閾値以上）
@@ -888,7 +981,17 @@ button.nseb-card-badge:active{transform:scale(1.08);}
         if (getPurchasedSet().length >= SUBSCRIBER_INFERENCE_THRESHOLD) {
           markActiveSubscriber();
         }
+      } else {
+        // 【2026-09-01追記】描画完了後も購入ボタンが表示されたまま＝この記事は
+        // 「今まさに」ロックされているという直接証拠。以前の判定（古い
+        // グローバルなサブスク推定等）でこの記事に誤って購入済みフラグが
+        // 立っていた場合は、新しい証拠を優先してその場で取り消す
+        // （subscriberAppliesTo/effectivePurchasedのコメント参照）。
+        var wasFlagged = isPurchased(postId);
+        codocLiveVerdict[postId] = false;
+        if (wasFlagged) { removePurchased(postId); }
       }
+      if (typeof onVerdict === 'function') { onVerdict(codocLiveVerdict[postId]); }
     }
     evaluate();
 
@@ -1001,28 +1104,46 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     // LocalStorageを最優先で参照し、ネットワーク応答を待たずに即座にハートを描画する。
     renderHeart();
 
-    // Codoc自身の購入ウィジェットを監視し、このブラウザが購入済み/購読中と
-    // 分かったら購入済みフラグを記録する（checkCodocPurchaseStateのコメント参照）。
-    checkCodocPurchaseState(postId);
     var purchasedEl = bar.querySelector('.nseb-stat-purchased');
     // 【2026-08-27追記】無料記事（data-paid="0"）では、サブスク加入者一括判定
     // だけを根拠に「🛒 購入済み」を早期描画しない（無料記事はそもそもサブスクの
     // 対象外のため）。有料記事かどうかはスケルトン生成時にPHP側で焼き込んだ
     // data-paid属性で判定する（build_status_bar_skeleton_html参照）。
     var isPaidArticle = bar.getAttribute('data-paid') === '1';
-    if (isPaidArticle && effectivePurchased(postId)) {
-      // ネットワーク応答を待たず、既知のフラグだけで即座に「🛒 購入済み」
-      // または「📖 読み放題」を描画し、サブスク誘導バナーも即座に隠しておく
-      // （カウントにもネットワーク応答にも依存しないため、待つ理由が無い。
-      // どちらのモードかはLocalStorageの2つのフラグだけで判定でき、
-      // これもネットワーク応答を待たずに分かる）。
-      if (purchasedEl) {
-        purchasedEl.classList.remove('nseb-skeleton');
-        var earlyMode = isPurchased(postId) ? 'purchased' : 'readfree';
-        renderAccessStat(purchasedEl, { show: true, mode: earlyMode }, null);
+    // 【2026-09-01追記】サーバーの実カウント（purchased_count）が届く前は
+    // nullのまま。computeAccessBadgeStateは「未確定」の間もLocalStorage側の
+    // 情報だけで暫定描画できるよう、purchasedCount!==nullを要求しない専用の
+    // 早期経路（下のisPaidArticle分岐）と、確定後の最終経路の両方から
+    // 呼び出せる小さなラッパーにする。
+    var lastKnownPurchasedCount = null;
+    function renderPurchaseBadge() {
+      if (!purchasedEl || !isPaidArticle) { return; }
+      purchasedEl.classList.remove('nseb-skeleton');
+      if (lastKnownPurchasedCount === null) {
+        // まだサーバー応答が無い＝件数不明の暫定描画。LocalStorage由来の
+        // フラグが立っている場合のみ、その場で分かるモードを先出しする。
+        if (effectivePurchased(postId)) {
+          var earlyMode = subscriberAppliesTo(postId) ? 'readfree' : 'purchased';
+          renderAccessStat(purchasedEl, { show: true, mode: earlyMode }, null);
+          hideUpsellBanners();
+        }
+        return;
       }
-      hideUpsellBanners();
+      var accessState = computeAccessBadgeState(lastKnownPurchasedCount, isPurchased(postId), subscriberAppliesTo(postId));
+      renderAccessStat(purchasedEl, accessState, lastKnownPurchasedCount);
+      if (accessState.mode === 'purchased' || accessState.mode === 'readfree') {
+        hideUpsellBanners();
+      }
     }
+
+    // Codoc自身の購入ウィジェットを監視し、このブラウザが購入済み/購読中と
+    // 分かったら購入済みフラグを記録する（checkCodocPurchaseStateのコメント参照）。
+    // onVerdictコールバックにより、初回判定・MutationObserverによる再判定の
+    // どちらでも、直後にバッジ表示を確定済み証拠に合わせて補正する（特に
+    // 「読み放題バッジなのにこの記事だけロックされたまま」という自己矛盾を
+    // 解消するのが目的。renderPurchaseBadgeのコメント参照）。
+    checkCodocPurchaseState(postId, renderPurchaseBadge);
+    renderPurchaseBadge();
 
     // postView(postId) は「このページを開いた」というPVを実際に+1記録し、
     // ついでにこの1記事分だけCodocの価格・購入数キャッシュもライブ更新する
@@ -1075,11 +1196,8 @@ button.nseb-card-badge:active{transform:scale(1.08);}
         purgeStaleLikes([postId]);
       }
 
-      if (purchasedEl) {
-        purchasedEl.classList.remove('nseb-skeleton');
-        var accessState = computeAccessBadgeState(d.purchased_count, isPurchased(postId), isActiveSubscriber());
-        renderAccessStat(purchasedEl, accessState, d.purchased_count);
-      }
+      lastKnownPurchasedCount = (typeof d.purchased_count !== 'undefined') ? d.purchased_count : null;
+      renderPurchaseBadge();
     });
 
     // pageshowでの再実行時にクリックリスナーが二重登録されクリック1回で
@@ -1194,7 +1312,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
       // 【2026-08-28修正】アクセス状態バッジ（購入済み/読み放題/購入者数）は
       // 価格バッジの直前に表示する（元の価格は消さずそのまま併記する仕様。
       // computeAccessBadgeStateのコメント参照）。
-      var accessState = computeAccessBadgeState(d.purchased_count, isPurchased(numericId), isActiveSubscriber());
+      var accessState = computeAccessBadgeState(d.purchased_count, isPurchased(numericId), subscriberAppliesTo(numericId));
       if (accessState.show) {
         var accessBadge = document.createElement('span');
         var accessLabel;
@@ -1349,6 +1467,13 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     initCardBadges();
     wireMyLibraryLinks();
   }
+  // 【2026-09-02追記：PJAX対応】custom-search-filter.phpのPJAX（#mainのみを
+  // fetch()で差し替える非同期部分更新）は、通常のDOMContentLoaded/pageshowを
+  // 発火させないため、記事一覧を差し替えるたびにこの関数を明示的に呼び直さないと
+  // 新しく挿入されたカードの価格・PV・スキ数バッジが永久に空のまま（スケルトンの
+  // 生成すらされない、なぜならバッジ自体がこの関数によるJS生成のみで、サーバー側
+  // HTMLには最初から一切含まれていないため）になってしまう不具合が実機で確認された。
+  window.nsebRefreshAll = refreshAll;
 
   // DOMを触らないため、DOMContentLoadedを待たずページ読み込み直後に判定する。
   checkSubscriptionConversionParam();
