@@ -19,3 +19,17 @@ env/
 # OS 生成ファイル
 .DS_Store
 Thumbs.db
+
+# note 記事ダウンローダー・変換・カタログ生成（大量の生成データはコミット対象外）
+note_articles/
+converted_html/
+note_download_errors.log
+update_all.log
+catalog.json
+public_html/
+# note_downloader.py 専用Chromeプロファイル（ログインセッションを含むため機密）
+chrome_user_data/
+
+# WordPress REST API用の認証情報（アプリケーションパスワード等の機密情報を含む）
+wp_credentials.json
+codoc_tag_mapping.csv
