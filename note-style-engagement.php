@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.4.0
+ * Version: 4.5.0
  * Author: junchan-world
  */
 
@@ -572,6 +572,19 @@ button.nseb-card-badge:active{transform:scale(1.08);}
 #nseb-my-library-tabs{display:flex;flex-wrap:wrap;gap:.5em;justify-content:center;}
 .nseb-library-tab{display:inline-block;padding:.5em 1em;border-radius:999px;background:#f1f1f1;color:#555;text-decoration:none;font-size:.92em;font-weight:bold;white-space:nowrap;}
 .nseb-library-tab.is-active{background:#333;color:#fff;}
+/* 【2026-09-14追記：購入復元ボタンの新設】Codocブロック直前に設置する
+   目立つ案内ボックス。純正の「ログインして購入を復元」導線が地味で
+   見落とされやすいという実機報告を受けて追加した代替導線。 */
+.nseb-restore-banner{margin:0 0 1em;padding:1em 1.2em;border-radius:10px;background:#eaf4ff;border:2px solid #2f6690;}
+.nseb-restore-banner-title{margin:0 0 .4em;font-size:1.05em;font-weight:bold;color:#1a4d8f;}
+.nseb-restore-banner-desc{margin:0 0 .8em;font-size:.92em;color:#333;line-height:1.6;}
+.nseb-restore-banner-btn{display:inline-flex;align-items:center;justify-content:center;gap:.4em;padding:.8em 1.4em;border-radius:8px;background:#1a4d8f;color:#fff;font-weight:bold;font-size:1em;border:none;cursor:pointer;min-height:48px;}
+.nseb-restore-banner-btn:hover{opacity:.9;}
+.nseb-restore-banner-btn:disabled{opacity:.6;cursor:wait;}
+/* Codoc純正「ログインして購入を復元」リンク（.codoc-subscription-articlelist-login a、
+   2026-09-14実機調査で確認したセレクタ）は装飾が無く見落とされやすいため、
+   太字・青文字・下線で見やすく補正する。 */
+.codoc-subscription-articlelist-login a{font-weight:bold !important;color:#1a4d8f !important;text-decoration:underline !important;font-size:1.05em !important;}
 </style>
         <?php
     }
@@ -921,6 +934,90 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   // （cms.js、defer属性）で非同期にDOMを書き換えるため、単純に一度だけ
   // チェックするのではなくMutationObserverで監視し、初回描画・購入完了後の
   // 動的な変化のどちらも取りこぼさないようにする。
+  // 【2026-09-14追記：購入復元ボタンの新設】別端末でのアクセスや認証切れの
+  // 場合、Codoc純正の「ログインして購入を復元」導線（.wp-block-codoc-codoc-block
+  // 内、.codoc-subscription-articlelist-login a。2026-09-14実機調査で確認した
+  // セレクタ）を踏まないと本文が開かない仕様だが、この純正リンクは装飾が無く
+  // 非常に見落とされやすく、「購入したのに読めない」という混乱を招いていた。
+  // Codocブロック直前に目立つ案内ボックス＋大きなボタンを設置し、クリック時に
+  // 純正リンクを代わりに.click()して同じ復元モーダルを起動する。
+  function clickNativeCodocRestoreLink(container, onDone) {
+    var existing = container.querySelector('.codoc-subscription-articlelist-login a');
+    if (existing) { existing.click(); if (onDone) { onDone(true); } return; }
+    // Codocウィジェット（cms.js）はDOMを非同期に書き換えるため、まだ純正
+    // リンクが描画されていない場合は出現を待ってから発火する（無期限には
+    // 待たず、8秒でフォールバックへ切り替える）。
+    var settled = false;
+    var timeoutId = window.setTimeout(function () {
+      if (settled) { return; }
+      settled = true;
+      obs.disconnect();
+      if (onDone) { onDone(false); }
+    }, 8000);
+    var obs = new MutationObserver(function () {
+      if (settled) { return; }
+      var link = container.querySelector('.codoc-subscription-articlelist-login a');
+      if (link) {
+        settled = true;
+        window.clearTimeout(timeoutId);
+        obs.disconnect();
+        link.click();
+        if (onDone) { onDone(true); }
+      }
+    });
+    obs.observe(container, { childList: true, subtree: true });
+  }
+
+  function insertRestoreBanner(container) {
+    if (document.querySelector('.nseb-restore-banner')) { return; } // 二重挿入防止
+    var banner = document.createElement('div');
+    banner.className = 'nseb-restore-banner';
+    banner.innerHTML =
+      '<p class="nseb-restore-banner-title">🔑 すでにサブスク加入・ご購入済みの方へ</p>'
+      + '<p class="nseb-restore-banner-desc">端末を切り替えた場合や、表示が戻ってしまった場合は、下のボタンからログインして購入を復元してください。</p>'
+      + '<button type="button" class="nseb-restore-banner-btn">🔄 ログインして購入を復元する</button>';
+    container.parentNode.insertBefore(banner, container);
+    var btn = banner.querySelector('.nseb-restore-banner-btn');
+    btn.addEventListener('click', function () {
+      if (btn.disabled) { return; }
+      btn.disabled = true;
+      var originalLabel = btn.textContent;
+      btn.textContent = '処理中…';
+      clickNativeCodocRestoreLink(container, function (found) {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        if (!found) {
+          // 純正リンクがどうしても見つからない場合のフォールバック：
+          // 少なくともCodocブロックの位置までスクロールして手動操作を促す。
+          container.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      });
+    });
+  }
+
+  // 【2026-09-14追記：購入復元バナーをcheckCodocPurchaseStateから独立させた
+  // 理由】当初はcheckCodocPurchaseState内（postId確定後）で呼んでいたが、
+  // 実機検証でこのバナーが記事によって一切表示されない不具合を発見した。
+  // 原因は、別ウィジェット（サイドバー検索ボックス、custom_html-3）の
+  // fixSingleArticleTitle()が、95文字超で切り詰められたpost_titleを
+  // note_full_titleへ置き換える際 `h1.textContent = fullTitleText` を実行
+  // しており、これがh1の子ノードを全て破棄すること（このプラグインの
+  // ステータスバー`.nseb-status-bar`はサーバー側でh1内に埋め込まれる設計の
+  // ため、この置換の巻き添えで丸ごと消える）。DOMContentLoadedリスナーの
+  // 登録順（サイドバーウィジェットの方が先にDOMへ現れるため先に実行される）
+  // により、長いタイトルの記事では高確率でこちらが先に走り、
+  // initStatusBar()が参照する前に`.nseb-status-bar`ごと消失する。これは
+  // 本チケットとは別ファイルの既存の競合状態のため、ここでは深追いして
+  // 修正せず、購入復元バナーの表示条件を`.nseb-status-bar`の生死に依存
+  // させないよう切り離すことで確実に動作させる（`.wp-block-codoc-codoc-block`
+  // の存在だけを条件にする。この要素はh1の外＝本文側にあるため、上記の
+  // 競合の影響を受けない）。
+  function initRestoreBanner() {
+    var container = document.querySelector('.wp-block-codoc-codoc-block');
+    if (!container) { return; }
+    insertRestoreBanner(container);
+  }
+
   function checkCodocPurchaseState(postId, onVerdict) {
     var container = document.querySelector('.wp-block-codoc-codoc-block');
     if (!container) { return; } // 無料記事、またはCodocブロックが無いページ
@@ -1466,6 +1563,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     initStatusBar();
     initCardBadges();
     wireMyLibraryLinks();
+    initRestoreBanner();
   }
   // 【2026-09-02追記：PJAX対応】custom-search-filter.phpのPJAX（#mainのみを
   // fetch()で差し替える非同期部分更新）は、通常のDOMContentLoaded/pageshowを
