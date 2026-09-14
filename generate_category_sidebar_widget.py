@@ -332,6 +332,19 @@ def build_html(categories: list[dict], category_tags: dict[str, list[dict]]) -> 
     var u;
     try {{ u = new URL(raw, window.location.href); }} catch (e) {{ u = null; }}
     var pathname = u ? u.pathname : String(raw).split('?')[0];
+    // 【2026-09-13追記：percent-encoding大文字小文字ゆれ対策】ウィジェット内の
+    // タグ/カテゴリーリンクは小文字percent-encoding（例: %e5%a4%a7、WordPress
+    // の実際のスラッグ・get_term_link()の値と一致させたもの）で埋め込んでいる
+    // が、日本語を含むURLへ生のUnicode文字経由（アドレスバーへの直接入力・
+    // 貼り付け等）で遷移した場合、ブラウザ自身がそのURLをエンコードし直す
+    // 際に大文字percent-encoding（%E5%A4%A7）になるケースが実機で確認された。
+    // 単純な文字列比較（===）ではこの大文字小文字の違いだけで一致しなくなり、
+    // タグ/カテゴリーページ遷移後にアコーディオン展開・青色ハイライトが
+    // 効かなくなる不具合を引き起こしていた。decodeURIComponent()で実際の
+    // 文字列（日本語そのもの）まで復元してから比較することで、encodingの
+    // 大文字小文字ゆれを吸収する（本来比較したいのは文字列の中身であって
+    // エンコード表現ではないため）。
+    try {{ pathname = decodeURIComponent(pathname); }} catch (e) {{}}
     var path = pathname.replace(/\\/page\\/\\d+\\/?$/, '/').replace(/\\/$/, '') + '/';
     var cat = u ? u.searchParams.get('cat') : null;
     return {{ path: path, cat: cat }};
