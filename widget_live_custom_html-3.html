@@ -83,9 +83,41 @@
     btn.classList.toggle('is-visible', input.value.length > 0);
   }
 
+  // 【2026-09-14追記：タグ/カテゴリーページ遷移時のキーワード保持】
+  // タグ・カテゴリーページ（/tag/{slug}/、/category/{slug}/）のURLには
+  // ?sパラメータが付与されないため、検索実行後にサイドバーのタグ/
+  // カテゴリーリンクをクリックすると、検索窓の入力値が空欄に戻って
+  // しまう不具合が報告された。検索結果ページ（URLに s パラメータが
+  // 存在する）を訪れるたびに、その値をsessionStorageへ保存しておき、
+  // sパラメータが無いページ（タグ/カテゴリー/一覧/ホーム等）では、
+  // 保存済みのキーワードがあればそれを検索窓へ復元表示する。
+  // ユーザーが検索窓を空にしたまま検索した場合（URLに s= のみで
+  // 値が空）や、クリアボタンを押した場合は、その「空にする」という
+  // 明示的な意思を正として記憶も消す。
+  var SEARCH_KEYWORD_KEY = 'nseb_search_keyword';
+  function saveSearchKeyword(v) {
+    try {
+      if (v) { sessionStorage.setItem(SEARCH_KEYWORD_KEY, v); }
+      else { sessionStorage.removeItem(SEARCH_KEYWORD_KEY); }
+    } catch (e) {}
+  }
+  function getSavedSearchKeyword() {
+    try { return sessionStorage.getItem(SEARCH_KEYWORD_KEY); } catch (e) { return null; }
+  }
+
   function syncSearchInputFromLocation(search) {
     var params = new URLSearchParams(search !== undefined && search !== null ? search : window.location.search);
-    var sVal = params.has('s') ? params.get('s') : '';
+    var sVal;
+    if (params.has('s')) {
+      // 検索結果ページ（?s=キーワード、空文字の場合も含む）を訪れた直後。
+      // URLの値をそのまま表示し、次回以降の非検索ページ遷移のために記憶する。
+      sVal = params.get('s');
+      saveSearchKeyword(sVal);
+    } else {
+      // sパラメータが無いページ（タグ/カテゴリー/一覧/ホーム等）では、
+      // 直前に検索していたキーワードがあればそれを復元表示する。
+      sVal = getSavedSearchKeyword() || '';
+    }
     var inputs = document.querySelectorAll('.custom-search-filter-form input[name="s"]');
     for (var i = 0; i < inputs.length; i++) {
       inputs[i].value = sVal;
@@ -132,6 +164,7 @@
     var input = wrap ? wrap.querySelector('input[name="s"]') : null;
     if (!input) { return; }
     input.value = '';
+    saveSearchKeyword(''); // クリアボタン＝明示的に空にする意思のため記憶も消す
     updateClearButtonState(input);
     input.focus();
   });
