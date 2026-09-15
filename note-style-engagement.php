@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.5.0
+ * Version: 4.6.0
  * Author: junchan-world
  */
 
@@ -572,15 +572,22 @@ button.nseb-card-badge:active{transform:scale(1.08);}
 #nseb-my-library-tabs{display:flex;flex-wrap:wrap;gap:.5em;justify-content:center;}
 .nseb-library-tab{display:inline-block;padding:.5em 1em;border-radius:999px;background:#f1f1f1;color:#555;text-decoration:none;font-size:.92em;font-weight:bold;white-space:nowrap;}
 .nseb-library-tab.is-active{background:#333;color:#fff;}
-/* 【2026-09-14追記：購入復元ボタンの新設】Codocブロック直前に設置する
-   目立つ案内ボックス。純正の「ログインして購入を復元」導線が地味で
-   見落とされやすいという実機報告を受けて追加した代替導線。 */
-.nseb-restore-banner{margin:0 0 1em;padding:1em 1.2em;border-radius:10px;background:#eaf4ff;border:2px solid #2f6690;}
-.nseb-restore-banner-title{margin:0 0 .4em;font-size:1.05em;font-weight:bold;color:#1a4d8f;}
-.nseb-restore-banner-desc{margin:0 0 .8em;font-size:.92em;color:#333;line-height:1.6;}
-.nseb-restore-banner-btn{display:inline-flex;align-items:center;justify-content:center;gap:.4em;padding:.8em 1.4em;border-radius:8px;background:#1a4d8f;color:#fff;font-weight:bold;font-size:1em;border:none;cursor:pointer;min-height:48px;}
-.nseb-restore-banner-btn:hover{opacity:.9;}
-.nseb-restore-banner-btn:disabled{opacity:.6;cursor:wait;}
+/* 【2026-09-14追記：購入復元ボタンの新設、2026-09-15追記：導線一本化】
+   Codocブロック直前に設置する統合案内ボックス。以前は「購入を復元」導線
+   単体の小さなバナーだったが、サブスク・単品購入の案内をサイドバーから
+   全廃してこの1箇所へ集約した（導線一本化）。純正の「ログインして購入を
+   復元」導線が地味で見落とされやすいという実機報告を受けて追加した
+   代替導線も、このボックスの一部として引き続き提供する。 */
+.nseb-purchase-guide{margin:0 0 1em;padding:1.2em 1.4em;border-radius:10px;background:#fffaf0;border:2px solid #e6b422;}
+.nseb-purchase-guide-title{margin:0 0 .8em;font-size:1.1em;font-weight:bold;color:#8a6d00;text-align:center;}
+.nseb-purchase-guide-section{margin:0 0 1em;}
+.nseb-purchase-guide-heading{margin:0 0 .3em;font-weight:bold;color:#d32f2f;font-size:.98em;}
+.nseb-purchase-guide-text{margin:0;font-size:.92em;color:#333;line-height:1.7;}
+.nseb-purchase-guide-note{display:block;margin-top:.3em;font-size:.85em;color:#666;}
+.nseb-purchase-guide-note a{color:#1a4d8f;font-weight:bold;}
+.nseb-purchase-guide-btn{display:flex;width:100%;box-sizing:border-box;align-items:center;justify-content:center;gap:.4em;padding:.8em 1.4em;border-radius:8px;background:#1a4d8f;color:#fff;font-weight:bold;font-size:1em;border:none;cursor:pointer;min-height:48px;}
+.nseb-purchase-guide-btn:hover{opacity:.9;}
+.nseb-purchase-guide-btn:disabled{opacity:.6;cursor:wait;}
 /* Codoc純正「ログインして購入を復元」リンク（.codoc-subscription-articlelist-login a、
    2026-09-14実機調査で確認したセレクタ）は装飾が無く見落とされやすいため、
    太字・青文字・下線で見やすく補正する。 */
@@ -968,16 +975,40 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     obs.observe(container, { childList: true, subtree: true });
   }
 
-  function insertRestoreBanner(container) {
-    if (document.querySelector('.nseb-restore-banner')) { return; } // 二重挿入防止
-    var banner = document.createElement('div');
-    banner.className = 'nseb-restore-banner';
-    banner.innerHTML =
-      '<p class="nseb-restore-banner-title">🔑 すでにサブスク加入・ご購入済みの方へ</p>'
-      + '<p class="nseb-restore-banner-desc">端末を切り替えた場合や、表示が戻ってしまった場合は、下のボタンからログインして購入を復元してください。</p>'
-      + '<button type="button" class="nseb-restore-banner-btn">🔄 ログインして購入を復元する</button>';
-    container.parentNode.insertBefore(banner, container);
-    var btn = banner.querySelector('.nseb-restore-banner-btn');
+  // 【2026-09-15追記：導線一本化】本文冒頭の赤い案内枠（auto_sync_blogs.pyの
+  // SUBSCRIPTION_UPSELL_BOX_TEMPLATE。単品購入時のnote元記事リンクを含む）
+  // には手を入れず残すが、そこに含まれる「単品でのご購入は、こちらの
+  // 【note元記事ページ】から」というリンクのURLだけを流用し、Codocブロック
+  // 直前の統合案内ボックス内にも同じ導線を再掲する（読者が実際に購入操作を
+  // 行う場所＝ペイウォール直前でも迷わないようにするため）。記事によって
+  // URLが異なるため、DOM上の実際のリンクから動的に取得する（ハードコード
+  // すると300件超の記事すべてに個別対応できないため）。
+  function findNoteOriginalUrl() {
+    var a = document.querySelector('.entry-content a[href*="note.com/"]');
+    return a ? a.getAttribute('href') : null;
+  }
+
+  function insertPurchaseGuide(container) {
+    if (document.querySelector('.nseb-purchase-guide')) { return; } // 二重挿入防止
+    var noteUrl = findNoteOriginalUrl();
+    var noteNoteHtml = noteUrl
+      ? '<span class="nseb-purchase-guide-note">（※noteアカウントでご購入・閲覧したい方は<a href="' + noteUrl.replace(/"/g, '&quot;') + '" target="_blank" rel="noopener">【note元記事ページ】</a>へ）</span>'
+      : '';
+    var guide = document.createElement('div');
+    guide.className = 'nseb-purchase-guide';
+    guide.innerHTML =
+      '<p class="nseb-purchase-guide-title">💡 有料記事の閲覧・ご購入について</p>'
+      + '<div class="nseb-purchase-guide-section">'
+      + '<p class="nseb-purchase-guide-heading">🌟 【当サイト限定】全記事読み放題（月額1,000円）</p>'
+      + '<p class="nseb-purchase-guide-text">過去記事（300冊以上）もすべて読み放題になります。下の枠内にある「購読プランを購入」からお手続きください。</p>'
+      + '</div>'
+      + '<div class="nseb-purchase-guide-section">'
+      + '<p class="nseb-purchase-guide-heading">この記事だけを単品で読みたい方</p>'
+      + '<p class="nseb-purchase-guide-text">下の枠内にある「記事を購入」ボタンからお読みいただけます。' + noteNoteHtml + '</p>'
+      + '</div>'
+      + '<button type="button" class="nseb-purchase-guide-btn">🔄 ログインして購入を復元する</button>';
+    container.parentNode.insertBefore(guide, container);
+    var btn = guide.querySelector('.nseb-purchase-guide-btn');
     btn.addEventListener('click', function () {
       if (btn.disabled) { return; }
       btn.disabled = true;
@@ -995,9 +1026,9 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     });
   }
 
-  // 【2026-09-14追記：購入復元バナーをcheckCodocPurchaseStateから独立させた
-  // 理由】当初はcheckCodocPurchaseState内（postId確定後）で呼んでいたが、
-  // 実機検証でこのバナーが記事によって一切表示されない不具合を発見した。
+  // 【2026-09-14追記：購入案内をcheckCodocPurchaseStateから独立させた理由】
+  // 当初はcheckCodocPurchaseState内（postId確定後）で呼んでいたが、
+  // 実機検証でこの案内が記事によって一切表示されない不具合を発見した。
   // 原因は、別ウィジェット（サイドバー検索ボックス、custom_html-3）の
   // fixSingleArticleTitle()が、95文字超で切り詰められたpost_titleを
   // note_full_titleへ置き換える際 `h1.textContent = fullTitleText` を実行
@@ -1008,14 +1039,14 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   // により、長いタイトルの記事では高確率でこちらが先に走り、
   // initStatusBar()が参照する前に`.nseb-status-bar`ごと消失する。これは
   // 本チケットとは別ファイルの既存の競合状態のため、ここでは深追いして
-  // 修正せず、購入復元バナーの表示条件を`.nseb-status-bar`の生死に依存
-  // させないよう切り離すことで確実に動作させる（`.wp-block-codoc-codoc-block`
-  // の存在だけを条件にする。この要素はh1の外＝本文側にあるため、上記の
+  // 修正せず、購入案内の表示条件を`.nseb-status-bar`の生死に依存させない
+  // よう切り離すことで確実に動作させる（`.wp-block-codoc-codoc-block`の
+  // 存在だけを条件にする。この要素はh1の外＝本文側にあるため、上記の
   // 競合の影響を受けない）。
   function initRestoreBanner() {
     var container = document.querySelector('.wp-block-codoc-codoc-block');
     if (!container) { return; }
-    insertRestoreBanner(container);
+    insertPurchaseGuide(container);
   }
 
   function checkCodocPurchaseState(postId, onVerdict) {
