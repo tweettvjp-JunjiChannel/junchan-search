@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.27.0
+ * Version: 1.28.0
  * Author: junchan-world
  */
 
@@ -779,9 +779,9 @@ class Custom_Search_Category_Filter {
      *   等）が大量に混入する。
      * ②再読み込み・再アクセスのたびに表示される記事が入れ替わる。
      *
-     * 【原因の特定】Cocoonテーマ（lib/related-entries.php、直接編集はしない。
-     * テーマ更新で上書きされるリスクを避ける方針は本ファイル既存の他の対応
-     * （redirect_legacy_category_archive等）と同じ）を調査した結果：
+     * 【原因の特定】Cocoonテーマ（lib/related-entries.php、tmp/related-list.php。
+     * 直接編集はしない。テーマ更新で上書きされるリスクを避ける方針は本ファイル
+     * 既存の他の対応（redirect_legacy_category_archive等）と同じ）を調査した結果：
      * - get_common_related_args()が `'orderby' => 'rand'` を無条件に設定して
      *   おり、これが②の直接原因（毎回SQLのORDER BY RAND()で完全にランダムな
      *   結果になる）。
@@ -789,37 +789,86 @@ class Custom_Search_Category_Filter {
      *   有無やカテゴリーの「質」（TweetTVの日次投稿かどうか）は一切考慮されて
      *   いない。TweetTV（ID 2447）は投稿数が2178件と非常に多く、noteやexblog
      *   の記事とタグ・カテゴリーが偶然重なるだけで①のように大量に紛れ込む。
+     * - tmp/related-list.php は `new WP_Query(get_related_wp_query_args())` を
+     *   一度呼ぶだけで、件数が足りない場合の補填クエリは一切存在しない
+     *   （Cocoon純正には「不足分を埋める」機構自体が無いことを実機・ソース
+     *   両方で確認済み）。そのため①②を単純なorderby/除外条件の追加だけで
+     *   直すと、同一カテゴリー/タグの記事数が少ない投稿で関連記事が
+     *   指定件数（既定6件）に満たない「スカスカ」状態が発生する
+     *   （実機報告：/n00a60d12fbad/ で2件のみ）。
      *
-     * 【対策】Cocoon本体が公開しているget_related_wp_query_argsフィルター
-     * （このフックはget_additional_related_wp_query_args()が優先度10で登録
-     * 済みのため、それより後の優先度20で登録し最終的な上書き権を持つ）で、
-     * WP_Queryの引数そのものを書き換える：
-     * ①ランダムソートを廃止し、公開日の新しい順という決定論的な並びにする
-     *   （毎回同じ記事が同じ順序で表示される）。
-     * ②アイキャッチ画像が無い記事（_thumbnail_idメタが存在しない）を除外する
-     *   meta_queryを追加する。
-     * ③TweetTV関連カテゴリー（RELATED_ENTRIES_EXCLUDE_CATEGORY_IDS）を
-     *   category__not_inで除外する。
+     * 【対策】get_related_wp_query_argsフィルター内で最終候補の投稿ID配列を
+     * 自前で確定し、Cocoon側の1回きりのWP_Queryでは実現できない「2段階の
+     * 補填」を行う：
+     * ①同一カテゴリー/タグ（Cocoonが既に解決済みのcategory__in/tag__in）×
+     *   アイキャッチ画像あり×除外カテゴリー対象外、を公開日の新しい順に
+     *   最大6件取得する。
+     * ②①だけで6件に満たない場合、除外カテゴリー対象外×アイキャッチ画像あり
+     *   （カテゴリー/タグの一致は問わない）サイト全体の最新記事から、
+     *   ①で選ばれた記事・現在の記事自身を除いて不足分だけを重複なく追加する。
+     * ③最終的に確定したID配列を post__in + orderby=post__in で固定し、
+     *   Cocoon側のWP_Queryがこの順序どおりに描画するようにする
+     *   （rand要素を完全排除、リロードしても常に同じ結果になる）。
+     * 候補が現在の記事1件しか無いような極端なケース（サイト全体で有効な
+     * 候補が0件）でのみ、安全側としてCocoon本来の挙動（$argsそのまま）に
+     * フォールバックする。
      */
     public function fix_related_entries_query_args($args) {
-        $args['orderby'] = 'date';
-        $args['order'] = 'DESC';
+        global $post;
+        $target_count = isset($args['posts_per_page']) && $args['posts_per_page'] ? (int) $args['posts_per_page'] : 6;
+        $current_id = ($post && isset($post->ID)) ? (int) $post->ID : 0;
 
-        if (!isset($args['meta_query']) || !is_array($args['meta_query'])) {
-            $args['meta_query'] = array();
-        }
-        $args['meta_query'][] = array(
-            'key'     => '_thumbnail_id',
-            'compare' => 'EXISTS',
+        $base_args = array(
+            'post_type'           => 'post',
+            'post_status'         => 'publish',
+            'category__not_in'    => self::RELATED_ENTRIES_EXCLUDE_CATEGORY_IDS,
+            'meta_query'          => array(
+                array('key' => '_thumbnail_id', 'compare' => 'EXISTS'),
+            ),
+            'orderby'             => 'date',
+            'order'               => 'DESC',
+            'no_found_rows'       => true,
+            'ignore_sticky_posts' => true,
+            'fields'              => 'ids',
         );
 
-        $exclude = self::RELATED_ENTRIES_EXCLUDE_CATEGORY_IDS;
-        if (isset($args['category__not_in']) && is_array($args['category__not_in'])) {
-            $exclude = array_merge($args['category__not_in'], $exclude);
-        }
-        $args['category__not_in'] = $exclude;
+        $selected = array();
 
-        return $args;
+        // ①同一カテゴリー/タグ優先（Cocoonが既に解決済みのcategory__in/tag__inをそのまま使う）
+        $primary_args = $base_args;
+        $primary_args['post__not_in'] = array($current_id);
+        if (!empty($args['category__in'])) {
+            $primary_args['category__in'] = $args['category__in'];
+        } elseif (!empty($args['tag__in'])) {
+            $primary_args['tag__in'] = $args['tag__in'];
+        }
+        if (!empty($primary_args['category__in']) || !empty($primary_args['tag__in'])) {
+            $primary_args['posts_per_page'] = $target_count;
+            $selected = (new WP_Query($primary_args))->posts;
+        }
+
+        // ②不足分をサイト全体の最新記事（カテゴリー/タグ不問）から補填する
+        if (count($selected) < $target_count) {
+            $fallback_args = $base_args;
+            $fallback_args['posts_per_page'] = $target_count - count($selected);
+            $fallback_args['post__not_in'] = array_merge(array($current_id), $selected);
+            $fallback_ids = (new WP_Query($fallback_args))->posts;
+            $selected = array_merge($selected, $fallback_ids);
+        }
+
+        if (empty($selected)) {
+            // 候補が1件も無い極端なケースのみ、Cocoon本来の挙動に委ねる。
+            return $args;
+        }
+
+        return array(
+            'post_type'           => 'post',
+            'post__in'            => $selected,
+            'orderby'             => 'post__in',
+            'posts_per_page'      => count($selected),
+            'no_found_rows'       => true,
+            'ignore_sticky_posts' => true,
+        );
     }
 
     /**
