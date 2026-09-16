@@ -183,6 +183,12 @@ def build_html(categories: list[dict], category_tags: dict[str, list[dict]]) -> 
 .cat-accordion-widget li.cat-acc-sub.cat-acc-open > .cat-acc-sub-row .cat-acc-tag-toggle{{color:#3b7ddb;}}
 .cat-accordion-widget a.cat-acc-candidate{{color:#3b7ddb;font-weight:bold;background:#eaf1fb;border-radius:4px;}}
 .cat-accordion-widget a.cat-acc-active{{color:#d32f2f;font-weight:bold;background:#fdecea;border-radius:4px;}}
+/* 【2026-09-17追記：「記事カテゴリー」見出しへの×リセットボタン新設】
+   ウィジェットタイトル（テーマ側がh3.widget-titleとして出力、このスクリプト
+   の外側にある）の右端に配置する。見出し自体をflexにして右寄せする。 */
+#custom_html-4 h3.widget-title{{display:flex;align-items:center;justify-content:space-between;}}
+.cat-acc-reset-btn{{background:none;border:none;font-size:1.1em;line-height:1;color:#999;cursor:pointer;padding:0 .2em;font-weight:normal;}}
+.cat-acc-reset-btn:hover{{color:#333;}}
 </style>
 <a href="/tags/" class="cat-acc-tagindex-link">🔤 キーワードから探す（50音順）</a>
 <ul class="cat-acc-list">{list_html}</ul>
@@ -588,6 +594,32 @@ def build_html(categories: list[dict], category_tags: dict[str, list[dict]]) -> 
       a.classList.remove('cat-acc-candidate');
     }});
   }};
+
+  // 【2026-09-17追記：「記事カテゴリー」見出しへの×リセットボタン新設】
+  // ウィジェットタイトル（テーマのwidget wrapperが出力するh3.widget-title、
+  // このスクリプトの外側の要素）の右端にボタンを挿入する。クリックで
+  // 既存のnsebResetSidebarAccordion()（アコーディオン全閉じ＋赤/青
+  // ハイライト解除、マイ本棚ボタンと共通のリセット処理）をそのまま呼ぶ。
+  function insertCategoryResetButton() {{
+    if (document.querySelector('.cat-acc-reset-btn')) {{ return; }} // 二重挿入防止
+    var widgetRoot = root.closest('aside, .widget');
+    var heading = widgetRoot ? widgetRoot.querySelector('h3.widget-title, h2.widget-title, .widgettitle') : null;
+    if (!heading) {{ return; }}
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cat-acc-reset-btn';
+    btn.setAttribute('aria-label', 'カテゴリー選択をリセット');
+    btn.textContent = '×';
+    btn.addEventListener('click', function (e) {{
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof window.nsebResetSidebarAccordion === 'function') {{
+        window.nsebResetSidebarAccordion();
+      }}
+    }});
+    heading.appendChild(btn);
+  }}
+  insertCategoryResetButton();
 }})();
 </script>
 </div>"""

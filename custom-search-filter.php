@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.31.0
+ * Version: 1.32.0
  * Author: junchan-world
  */
 
@@ -802,6 +802,22 @@ class Custom_Search_Category_Filter {
      * 更新日の新しい順）に並べ替えてから上位N件を採用する2段階方式にした。
      * これにより、多タグ記事でも本当に関連性の高い（共通タグが多い）記事が
      * 優先される。
+     *
+     * 【2026-09-17追記：本文引用順の最優先】サイドバーで何も絞り込んでいない
+     * 「通常時」は、タグ一致よりも「今読んでいる記事の本文が実際にどのnote
+     * 記事へ言及・リンクしているか」の方が読者にとって遥かに文脈が明確で
+     * 価値が高いという判断から、本文（post_content）中の内部note記事リンク
+     * を出現順に抽出し、関連記事の先頭から並べる方式を追加した。実機確認
+     * （/neeced619e971/）で、本文冒頭に引用されている【ガン治療の真実】が
+     * 実際に1件目になることを確認済み。①本文引用順で抽出→②target_countに
+     * 満たない分だけ、従来の「一致タグ数優先」ロジックで補う（水増しは
+     * せず、タグの重なりという本物の関連性でのみ補う）、という2段構成。
+     * なお「検索キーワードあり／特定タグ・カテゴリー選択時」の絞り込み
+     * コンテキストはサイドバーのsessionStorage状態（サーバーサイドの
+     * この関数からは参照できない）に依存するため、そちらの出し分けは
+     * クライアントサイドJS側で行う（note-style-engagement.phpの
+     * applyRelatedEntriesContextOverride参照）。この関数はあくまで
+     * 「絞り込みが無い場合のデフォルト」を担う。
      */
     public function fix_related_entries_query_args($args) {
         global $post;
@@ -825,14 +841,6 @@ class Custom_Search_Category_Filter {
         $current_ids = array_values(array_unique(array_filter($current_ids)));
         $current_post_id = !empty($current_ids) ? $current_ids[0] : 0;
 
-        // 現在の記事のタグIDを取得する。タグが1つも無い記事は「同一タグの
-        // note記事」という定義上そもそも関連記事が存在しないため、
-        // 空のpost__inを返して0件（＝エリア非表示）にする。
-        $tag_ids = $current_post_id ? wp_get_post_tags($current_post_id, array('fields' => 'ids')) : array();
-        if (empty($tag_ids)) {
-            return array('post_type' => 'post', 'post__in' => array(0), 'posts_per_page' => 0);
-        }
-
         // Cocoon純正のget_additional_related_wp_query_args()（優先度10）が
         // テーマ設定「除外カテゴリー」に基づき$args['category__not_in']を
         // 既に設定している場合があるため、上書きせずマージする。
@@ -845,49 +853,58 @@ class Custom_Search_Category_Filter {
             ? (int) $args['posts_per_page']
             : 6;
 
-        // ①候補プールをtag__in（いずれか1つでも一致）で取得する。並べ替え計算
-        // の対象を無制限にしないよう上限50件に絞る（更新日順で新しいものを
-        // 優先的に候補へ入れる。ここでの順序は②で完全に上書きされるため、
-        // 「同スコア内の初期順」程度の意味しか持たない）。
-        $candidate_args = array(
-            'post_type'           => 'post',
-            'post_status'         => 'publish',
-            'category__in'        => array(self::CAT_MAP['note']),
-            'category__not_in'    => $exclude_categories,
-            'tag__in'             => $tag_ids,
-            'post__not_in'        => $current_ids,
-            'meta_query'          => array(
-                array('key' => '_thumbnail_id', 'compare' => 'EXISTS'),
-            ),
-            'orderby'             => 'modified',
-            'order'               => 'DESC',
-            'posts_per_page'      => 50,
-            'no_found_rows'       => true,
-            'ignore_sticky_posts' => true,
-            'fields'              => 'ids',
-        );
-        $candidate_ids = (new WP_Query($candidate_args))->posts;
+        // ①本文引用順：現在の記事の本文中に実際にリンクされているnote記事を
+        // 出現順に抽出する。
+        $selected = $this->extract_cited_note_post_ids_in_order($post, $current_ids, $exclude_categories);
+        $selected = array_slice($selected, 0, $target_count);
 
-        if (empty($candidate_ids)) {
+        // ②不足分をタグ一致優先で補う（同一タグを持つ候補を一致数の多い順に
+        // 並べ替えてから、まだ選ばれていない分だけ追加する）。
+        if (count($selected) < $target_count) {
+            $tag_ids = $current_post_id ? wp_get_post_tags($current_post_id, array('fields' => 'ids')) : array();
+            if (!empty($tag_ids)) {
+                $candidate_args = array(
+                    'post_type'           => 'post',
+                    'post_status'         => 'publish',
+                    'category__in'        => array(self::CAT_MAP['note']),
+                    'category__not_in'    => $exclude_categories,
+                    'tag__in'             => $tag_ids,
+                    'post__not_in'        => array_merge($current_ids, $selected),
+                    'meta_query'          => array(
+                        array('key' => '_thumbnail_id', 'compare' => 'EXISTS'),
+                    ),
+                    'orderby'             => 'modified',
+                    'order'               => 'DESC',
+                    'posts_per_page'      => 50,
+                    'no_found_rows'       => true,
+                    'ignore_sticky_posts' => true,
+                    'fields'              => 'ids',
+                );
+                $candidate_ids = (new WP_Query($candidate_args))->posts;
+
+                if (!empty($candidate_ids)) {
+                    $scored = array();
+                    foreach ($candidate_ids as $cid) {
+                        $candidate_tag_ids = wp_get_post_tags($cid, array('fields' => 'ids'));
+                        $scored[] = array(
+                            'id'    => $cid,
+                            'match' => count(array_intersect($tag_ids, $candidate_tag_ids)),
+                        );
+                    }
+                    // usortはPHP8.0以降で安定ソートのため、同数内では候補
+                    // クエリで取得した更新日順が保持される。
+                    usort($scored, function ($a, $b) {
+                        return $b['match'] <=> $a['match'];
+                    });
+                    $need = $target_count - count($selected);
+                    $selected = array_merge($selected, array_slice(wp_list_pluck($scored, 'id'), 0, $need));
+                }
+            }
+        }
+
+        if (empty($selected)) {
             return array('post_type' => 'post', 'post__in' => array(0), 'posts_per_page' => 0);
         }
-
-        // ②候補ごとに現在の記事との一致タグ数を計算し、一致数の多い順
-        // （usortはPHP8.0以降で安定ソートのため、同数内では①で取得した
-        // 更新日順が保持される）に並べ替える。
-        $scored = array();
-        foreach ($candidate_ids as $cid) {
-            $candidate_tag_ids = wp_get_post_tags($cid, array('fields' => 'ids'));
-            $scored[] = array(
-                'id'    => $cid,
-                'match' => count(array_intersect($tag_ids, $candidate_tag_ids)),
-            );
-        }
-        usort($scored, function ($a, $b) {
-            return $b['match'] <=> $a['match'];
-        });
-
-        $selected = array_slice(wp_list_pluck($scored, 'id'), 0, $target_count);
 
         return array(
             'post_type'           => 'post',
@@ -897,6 +914,62 @@ class Custom_Search_Category_Filter {
             'no_found_rows'       => true,
             'ignore_sticky_posts' => true,
         );
+    }
+
+    /**
+     * 現在の記事の本文（post_content）中に実際にリンクされている内部note
+     * 記事（https://junchan-world.com/n{12桁16進}/ 形式）を、本文中に最初に
+     * 出現した順に重複なく抽出し、投稿ID配列で返す。自記事・除外カテゴリー・
+     * アイキャッチ画像無しの記事は除く。get_posts()のpost_name__inで一括
+     * 取得してからスラッグ→IDのマップを作り、正規表現で抽出した出現順に
+     * 並べ替える（get_posts自体の返却順はpost_name__inの指定順を保証しない
+     * ため、明示的に並べ替えが必要）。
+     */
+    private function extract_cited_note_post_ids_in_order($post, $current_ids, $exclude_categories) {
+        if (!$post || empty($post->post_content)) {
+            return array();
+        }
+
+        preg_match_all('/https:\/\/junchan-world\.com\/(n[0-9a-f]{12}(?:-\d+)?)\//', $post->post_content, $matches);
+        if (empty($matches[1])) {
+            return array();
+        }
+
+        $cited_slugs = array();
+        foreach ($matches[1] as $slug) {
+            if (!in_array($slug, $cited_slugs, true)) {
+                $cited_slugs[] = $slug;
+            }
+        }
+
+        $cited_posts = get_posts(array(
+            'post_type'           => 'post',
+            'post_status'         => 'publish',
+            'post_name__in'       => $cited_slugs,
+            'category__in'        => array(self::CAT_MAP['note']),
+            'category__not_in'    => $exclude_categories,
+            'post__not_in'        => $current_ids,
+            'meta_query'          => array(
+                array('key' => '_thumbnail_id', 'compare' => 'EXISTS'),
+            ),
+            'posts_per_page'      => -1,
+            'orderby'             => 'none',
+            'no_found_rows'       => true,
+            'ignore_sticky_posts' => true,
+        ));
+
+        $id_by_slug = array();
+        foreach ($cited_posts as $cited_post) {
+            $id_by_slug[$cited_post->post_name] = $cited_post->ID;
+        }
+
+        $ordered_ids = array();
+        foreach ($cited_slugs as $slug) {
+            if (isset($id_by_slug[$slug])) {
+                $ordered_ids[] = $id_by_slug[$slug];
+            }
+        }
+        return $ordered_ids;
     }
 
     /**

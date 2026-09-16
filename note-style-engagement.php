@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.9.0
+ * Version: 4.11.0
  * Author: junchan-world
  */
 
@@ -1092,6 +1092,135 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     insertPurchaseGuide(container);
   }
 
+  // 【2026-09-17追記：関連記事の「絞り込み時」出し分け】
+  // custom-search-filter.php側のfix_related_entries_query_args()は
+  // サーバーサイドのため、サイドバーの検索キーワード（custom_html-3、
+  // sessionStorageのnseb_search_keyword）やカテゴリー/タグの選択状態
+  // （custom_html-4、sessionStorageのnseb_active_path）という「今このブラウザが
+  // 絞り込み中かどうか」を一切参照できない。そのため、通常時のデフォルト
+  // （本文引用順→タグ一致優先で補完）はサーバーサイドのまま維持しつつ、
+  // 「絞り込み中」の判定と出し分けだけをクライアントサイドのこの関数で
+  // 行う。優先順位は検索キーワード＞カテゴリー/タグ選択（両方あれば
+  // 検索キーワードを優先）。WP REST API（wp/v2/posts）は公開記事に対して
+  // 認証不要で読み取れるため、専用のRESTルートを新設せずに実現できる。
+  var RELATED_NOTE_CATEGORY_ID = 2471;
+  var RELATED_OVERRIDE_COUNT = 6;
+
+  function getCurrentPostIdFromBody() {
+    var m = document.body.className.match(/(?:^|\s)postid-(\d+)(?:\s|$)/);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  function buildRelatedCardHtml(p, imgUrl) {
+    var title = (p.title && p.title.rendered) ? p.title.rendered : '';
+    var excerptHtml = (p.excerpt && p.excerpt.rendered) ? p.excerpt.rendered : '';
+    var excerptText = excerptHtml.replace(/<[^>]*>/g, '').trim();
+    var safeTitleAttr = title.replace(/"/g, '&quot;');
+    return '<a href="' + p.link + '" class="related-entry-card-wrap a-wrap border-element cf" title="' + safeTitleAttr + '">'
+      + '<article class="related-entry-card e-card cf post type-post status-publish hentry category-note-post">'
+      + '<figure class="related-entry-card-thumb card-thumb e-card-thumb">'
+      + (imgUrl ? '<img src="' + imgUrl + '" class="related-entry-card-thumb-image card-thumb-image wp-post-image" alt="" loading="lazy">' : '')
+      + '<span class="cat-label cat-label-2471">note</span>'
+      + '</figure>'
+      + '<div class="related-entry-card-content card-content e-card-content">'
+      + '<h3 class="related-entry-card-title card-title e-card-title">' + title + '</h3>'
+      + '<div class="related-entry-card-snippet card-snippet e-card-snippet">' + excerptText + '</div>'
+      + '</div>'
+      + '</article>'
+      + '</a>';
+  }
+
+  // REST APIから取得した候補一覧を関連記事枠へ描画する。0件時は何もせず
+  // サーバー側のデフォルト（本文引用順等）をそのまま残す（絞り込み条件に
+  // 一致する記事が無いのに空にしてしまうと、読者にとって「通常時より情報が
+  // 減る」という改悪になるため）。
+  function renderRelatedOverride(list, posts, currentId) {
+    posts = (posts || []).filter(function (p) { return p.id !== currentId; }).slice(0, RELATED_OVERRIDE_COUNT);
+    if (!posts.length) { return false; }
+    var html = posts.map(function (p) {
+      var media = p._embedded && p._embedded['wp:featuredmedia'] && p._embedded['wp:featuredmedia'][0];
+      var imgUrl = media && media.source_url ? media.source_url : '';
+      return buildRelatedCardHtml(p, imgUrl);
+    }).join('');
+    list.innerHTML = html;
+    // aside#related-entriesは「.related-entry-card-wrapを1つも含まない」
+    // 場合にCSSの:has()でdisplay:noneにしている（custom-search-filter.php
+    // 参照）。ここでカードを実際に挿入することで:has()の条件が変わり、
+    // 0件で非表示だった記事（タグ無し記事等）でも絞り込み結果があれば
+    // 自動的に再表示される。
+    return true;
+  }
+
+  // 【2026-09-17追記：タイトル一致優先の並べ替え】WP REST標準のsearch=は
+  // タイトルだけでなく本文中の一致も拾う上、関連度スコアリングを行わない
+  // （日付順に近い並びになる）ため、「キーワードが本文のどこかに出てくる
+  // だけの無関係な記事」が上位に来てしまうことを実機で確認した（本来
+  // カスタム検索ページで使っているprioritize_title_matches等のタイトル
+  // 優先フィルターは is_main_query() 限定のためREST経由のクエリには
+  // 適用されない）。対策として、候補プールを多め（20件）に取得した上で、
+  // クライアント側でタイトルにキーワードを含むものを先頭へ安定ソート
+  // （Array.prototype.sortはES2019以降で安定ソートが仕様上保証されている）
+  // してから上位6件を採用する。
+  function fetchRelatedByQuery(list, currentId, queryString, titleKeyword) {
+    var url = restRoot.replace('/engage/v1', '') + '/wp/v2/posts?' + queryString
+      + '&per_page=20'
+      + '&_fields=id,link,title,excerpt'
+      + '&_embed=wp:featuredmedia'
+      + '&_=' + Date.now();
+    fetch(url, { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (posts) {
+        posts = posts || [];
+        if (titleKeyword) {
+          var kw = titleKeyword.toLowerCase();
+          posts.sort(function (a, b) {
+            var aTitle = ((a.title && a.title.rendered) || '').toLowerCase();
+            var bTitle = ((b.title && b.title.rendered) || '').toLowerCase();
+            var aHit = aTitle.indexOf(kw) !== -1 ? 0 : 1;
+            var bHit = bTitle.indexOf(kw) !== -1 ? 0 : 1;
+            return aHit - bHit;
+          });
+        }
+        renderRelatedOverride(list, posts, currentId);
+      })
+      .catch(function () {});
+  }
+
+  function applyRelatedEntriesContextOverride() {
+    var list = document.querySelector('#related-entries .related-list');
+    if (!list) { return; }
+    var currentId = getCurrentPostIdFromBody();
+
+    var keyword = null;
+    try { keyword = sessionStorage.getItem('nseb_search_keyword'); } catch (e) {}
+    if (keyword && keyword.trim()) {
+      var trimmedKeyword = keyword.trim();
+      fetchRelatedByQuery(
+        list,
+        currentId,
+        'search=' + encodeURIComponent(trimmedKeyword) + '&categories=' + RELATED_NOTE_CATEGORY_ID,
+        trimmedKeyword
+      );
+      return;
+    }
+
+    // 検索キーワードが無い場合のみ、カテゴリー/タグの選択状態を見る。
+    // nseb_active_pathは記事カテゴリーウィジェット（custom_html-4）が
+    // 保存する「今アクティブなカテゴリー/タグURL」（例:
+    // /tag/{slug}/?cat=123 や /category/{slug}/）。ここではURLの`cat=`
+    // クエリ（サブカテゴリーID）が読み取れる場合のみ、そのカテゴリーで
+    // 絞り込む（タグスラッグ→ID解決は別途REST呼び出しが必要になり複雑化
+        // するため、まずは確実に読み取れるcat=のケースに対応する）。
+    var activePath = null;
+    try { activePath = sessionStorage.getItem('nseb_active_path'); } catch (e) {}
+    if (activePath) {
+      var m = activePath.match(/[?&]cat=(\d+)/);
+      if (m) {
+        fetchRelatedByQuery(list, currentId, 'categories=' + m[1]);
+      }
+    }
+  }
+
   function checkCodocPurchaseState(postId, onVerdict) {
     var container = document.querySelector('.wp-block-codoc-codoc-block');
     if (!container) { return; } // 無料記事、またはCodocブロックが無いページ
@@ -1638,6 +1767,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     initCardBadges();
     wireMyLibraryLinks();
     initRestoreBanner();
+    applyRelatedEntriesContextOverride();
   }
   // 【2026-09-02追記：PJAX対応】custom-search-filter.phpのPJAX（#mainのみを
   // fetch()で差し替える非同期部分更新）は、通常のDOMContentLoaded/pageshowを
