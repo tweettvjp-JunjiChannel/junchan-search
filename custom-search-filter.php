@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.29.0
+ * Version: 1.31.0
  * Author: junchan-world
  */
 
@@ -773,63 +773,42 @@ class Custom_Search_Category_Filter {
     }
 
     /**
-     * 【2026-09-18追記：関連記事のランダム表示・ゴミ記事混入を是正】
-     * 実機報告により、記事下の「関連記事」に以下2つの問題があることが判明した：
-     * ①アイキャッチ画像の無い、無関係な旧TweetTV JPの日次記事（「○/○(○) ニュース」
-     *   等）が大量に混入する。
-     * ②再読み込み・再アクセスのたびに表示される記事が入れ替わる。
+     * 【2026-09-18〜19追記：関連記事ロジックの抜本刷新】
+     * 当初はランダム表示・ゴミ記事混入・件数不足という個別の不具合を都度
+     * パッチしていたが、実機UX検証の結果「水増し補填（サイト全体の最新記事
+     * で埋める）」自体が『無関係な記事が関連記事として出てくる』という
+     * 根本的な違和感の温床になっていると判明したため、方針を転換した。
      *
-     * 【原因の特定】Cocoonテーマ（lib/related-entries.php、tmp/related-list.php。
-     * 直接編集はしない。テーマ更新で上書きされるリスクを避ける方針は本ファイル
-     * 既存の他の対応（redirect_legacy_category_archive等）と同じ）を調査した結果：
-     * - get_common_related_args()が `'orderby' => 'rand'` を無条件に設定して
-     *   おり、これが②の直接原因（毎回SQLのORDER BY RAND()で完全にランダムな
-     *   結果になる）。
-     * - 関連付けはカテゴリーまたはタグの一致のみで行われ、アイキャッチ画像の
-     *   有無やカテゴリーの「質」（TweetTVの日次投稿かどうか）は一切考慮されて
-     *   いない。TweetTV（ID 2447）は投稿数が2178件と非常に多く、noteやexblog
-     *   の記事とタグ・カテゴリーが偶然重なるだけで①のように大量に紛れ込む。
-     * - tmp/related-list.php は `new WP_Query(get_related_wp_query_args())` を
-     *   一度呼ぶだけで、件数が足りない場合の補填クエリは一切存在しない
-     *   （Cocoon純正には「不足分を埋める」機構自体が無いことを実機・ソース
-     *   両方で確認済み）。そのため①②を単純なorderby/除外条件の追加だけで
-     *   直すと、同一カテゴリー/タグの記事数が少ない投稿で関連記事が
-     *   指定件数（既定6件）に満たない「スカスカ」状態が発生する
-     *   （実機報告：/n00a60d12fbad/ で2件のみ）。
+     * 【新方針】
+     * - 抽出条件は「現在の記事と同一タグ（post_tag）を持つnote記事」のみに
+     *   限定する（カテゴリー一致でのフォールバックも廃止）。
+     * - 水増し補填は完全廃止。一致件数が6件未満でもそのまま1〜6件を表示し、
+     *   0件なら関連記事エリア自体を非表示にする（is_related_entries_visible()
+     *   はクエリ結果を見ずに一律trueを返す静的設定のため、テーマの
+     *   tmp/related-entries.phpを直接編集せず、CSSの:has()で
+     *   「.related-entry-card-wrapを1つも含まないaside#related-entries」を
+     *   非表示にする形で対応する。print_twitcasting_pager_assetsのCSS参照）。
+     * - 除外ルール（自記事・アイキャッチ無し・TweetTV関連カテゴリー）は
+     *   引き続き維持する。
      *
-     * 【対策】get_related_wp_query_argsフィルター内で最終候補の投稿ID配列を
-     * 自前で確定し、Cocoon側の1回きりのWP_Queryでは実現できない「2段階の
-     * 補填」を行う：
-     * ①同一カテゴリー/タグ（Cocoonが既に解決済みのcategory__in/tag__in）×
-     *   アイキャッチ画像あり×除外カテゴリー対象外、を公開日の新しい順に
-     *   最大6件取得する。
-     * ②①だけで6件に満たない場合、除外カテゴリー対象外×アイキャッチ画像あり
-     *   （カテゴリー/タグの一致は問わない）サイト全体の最新記事から、
-     *   ①で選ばれた記事・現在の記事自身を除いて不足分だけを重複なく追加する。
-     * ③最終的に確定したID配列を post__in + orderby=post__in で固定し、
-     *   Cocoon側のWP_Queryがこの順序どおりに描画するようにする
-     *   （rand要素を完全排除、リロードしても常に同じ結果になる）。
-     * 候補が現在の記事1件しか無いような極端なケース（サイト全体で有効な
-     * 候補が0件）でのみ、安全側としてCocoon本来の挙動（$argsそのまま）に
-     * フォールバックする。
+     * 【2026-09-19追記：一致タグ数による並べ替え】実機検証で、多数のタグ
+     * （実例：29個）を持つ「複数トピックのオムニバス記事」の場合、
+     * tag__inが「いずれか1つでも一致」というOR条件のため、バチカン・
+     * トランプ・ユダヤ等サイト全体で頻出するタグ経由で本来の主題（例：
+     * 大谷翔平）と無関係な記事まで拾われ、実質「直近更新されたnote記事」
+     * に近い挙動になってしまう不具合が判明した。対策として、tag__inで
+     * 候補プール（最大50件、更新日順）を取得した後、PHP側で候補ごとに
+     * 「現在の記事との一致タグ数」を計算し、一致タグ数の多い順（同数内は
+     * 更新日の新しい順）に並べ替えてから上位N件を採用する2段階方式にした。
+     * これにより、多タグ記事でも本当に関連性の高い（共通タグが多い）記事が
+     * 優先される。
      */
     public function fix_related_entries_query_args($args) {
         global $post;
-        // 【コードレビュー指摘対応】posts_per_pageが0や負値（WP_Queryの
-        // 「無制限」慣習である-1等）の場合はCocoon設定の意図しない値として
-        // 扱い、既定の6件にフォールバックする（そのまま使うと後段の
-        // 「count($selected) < $target_count」判定が常に真/偽どちらかに
-        // 固定され、本来の補填ロジックが機能しなくなるため）。
-        $target_count = (isset($args['posts_per_page']) && (int) $args['posts_per_page'] > 0)
-            ? (int) $args['posts_per_page']
-            : 6;
 
-        // 【2026-09-18追記：自記事の完全除外を堅牢化】単一のglobal $post参照
-        // だけに頼らず、現在の投稿IDを複数の信頼できる経路から集めて全て
-        // 除外リストへ入れる（いずれか1つが取得できていれば確実に除外できる
-        // ようにする冗長化。Cocoon側get_common_related_args()が既に
-        // 組み立てた$args['post__not_in']にも現在の投稿IDが含まれている
-        // はずなので、それもそのまま引き継ぐ）。
+        // 【自記事の完全除外】単一のglobal $post参照だけに頼らず、現在の
+        // 投稿IDを複数の信頼できる経路から集めて全て除外リストへ入れる
+        // （いずれか1つが正しく取得できれば確実に除外できるようにする冗長化）。
         $current_ids = array();
         if ($post && isset($post->ID)) {
             $current_ids[] = (int) $post->ID;
@@ -844,64 +823,71 @@ class Custom_Search_Category_Filter {
             }
         }
         $current_ids = array_values(array_unique(array_filter($current_ids)));
+        $current_post_id = !empty($current_ids) ? $current_ids[0] : 0;
 
-        // 【コードレビュー指摘対応】Cocoon純正のget_additional_related_wp_query_args()
-        // （優先度10）がテーマ設定「除外カテゴリー」（get_archive_exclude_category_ids()）
-        // に基づき$args['category__not_in']を既に設定している場合があるため、
-        // 上書きせずこちらの除外リストとマージする。
+        // 現在の記事のタグIDを取得する。タグが1つも無い記事は「同一タグの
+        // note記事」という定義上そもそも関連記事が存在しないため、
+        // 空のpost__inを返して0件（＝エリア非表示）にする。
+        $tag_ids = $current_post_id ? wp_get_post_tags($current_post_id, array('fields' => 'ids')) : array();
+        if (empty($tag_ids)) {
+            return array('post_type' => 'post', 'post__in' => array(0), 'posts_per_page' => 0);
+        }
+
+        // Cocoon純正のget_additional_related_wp_query_args()（優先度10）が
+        // テーマ設定「除外カテゴリー」に基づき$args['category__not_in']を
+        // 既に設定している場合があるため、上書きせずマージする。
         $exclude_categories = self::RELATED_ENTRIES_EXCLUDE_CATEGORY_IDS;
         if (!empty($args['category__not_in']) && is_array($args['category__not_in'])) {
             $exclude_categories = array_values(array_unique(array_merge($exclude_categories, $args['category__not_in'])));
         }
 
-        $base_args = array(
+        $target_count = (isset($args['posts_per_page']) && (int) $args['posts_per_page'] > 0)
+            ? (int) $args['posts_per_page']
+            : 6;
+
+        // ①候補プールをtag__in（いずれか1つでも一致）で取得する。並べ替え計算
+        // の対象を無制限にしないよう上限50件に絞る（更新日順で新しいものを
+        // 優先的に候補へ入れる。ここでの順序は②で完全に上書きされるため、
+        // 「同スコア内の初期順」程度の意味しか持たない）。
+        $candidate_args = array(
             'post_type'           => 'post',
             'post_status'         => 'publish',
+            'category__in'        => array(self::CAT_MAP['note']),
             'category__not_in'    => $exclude_categories,
+            'tag__in'             => $tag_ids,
+            'post__not_in'        => $current_ids,
             'meta_query'          => array(
                 array('key' => '_thumbnail_id', 'compare' => 'EXISTS'),
             ),
-            'orderby'             => 'date',
+            'orderby'             => 'modified',
             'order'               => 'DESC',
+            'posts_per_page'      => 50,
             'no_found_rows'       => true,
             'ignore_sticky_posts' => true,
             'fields'              => 'ids',
         );
+        $candidate_ids = (new WP_Query($candidate_args))->posts;
 
-        $selected = array();
-
-        // ①同一カテゴリー/タグ優先（Cocoonが既に解決済みのcategory__in/tag__inをそのまま使う）
-        $primary_args = $base_args;
-        $primary_args['post__not_in'] = $current_ids;
-        if (!empty($args['category__in'])) {
-            $primary_args['category__in'] = $args['category__in'];
-        } elseif (!empty($args['tag__in'])) {
-            $primary_args['tag__in'] = $args['tag__in'];
-        }
-        if (!empty($primary_args['category__in']) || !empty($primary_args['tag__in'])) {
-            $primary_args['posts_per_page'] = $target_count;
-            $selected = (new WP_Query($primary_args))->posts;
+        if (empty($candidate_ids)) {
+            return array('post_type' => 'post', 'post__in' => array(0), 'posts_per_page' => 0);
         }
 
-        // ②不足分をサイト全体の最新記事（カテゴリー/タグ不問）から補填する
-        if (count($selected) < $target_count) {
-            $fallback_args = $base_args;
-            $fallback_args['posts_per_page'] = $target_count - count($selected);
-            $fallback_args['post__not_in'] = array_merge($current_ids, $selected);
-            $fallback_ids = (new WP_Query($fallback_args))->posts;
-            $selected = array_merge($selected, $fallback_ids);
+        // ②候補ごとに現在の記事との一致タグ数を計算し、一致数の多い順
+        // （usortはPHP8.0以降で安定ソートのため、同数内では①で取得した
+        // 更新日順が保持される）に並べ替える。
+        $scored = array();
+        foreach ($candidate_ids as $cid) {
+            $candidate_tag_ids = wp_get_post_tags($cid, array('fields' => 'ids'));
+            $scored[] = array(
+                'id'    => $cid,
+                'match' => count(array_intersect($tag_ids, $candidate_tag_ids)),
+            );
         }
+        usort($scored, function ($a, $b) {
+            return $b['match'] <=> $a['match'];
+        });
 
-        // 【念のための最終ガード】上記の除外条件をすり抜けて自記事が混入して
-        // いた場合に備え、最終選定リストからも明示的に取り除く。
-        if (!empty($current_ids)) {
-            $selected = array_values(array_diff($selected, $current_ids));
-        }
-
-        if (empty($selected)) {
-            // 候補が1件も無い極端なケースのみ、Cocoon本来の挙動に委ねる。
-            return $args;
-        }
+        $selected = array_slice(wp_list_pluck($scored, 'id'), 0, $target_count);
 
         return array(
             'post_type'           => 'post',
@@ -962,6 +948,25 @@ class Custom_Search_Category_Filter {
    上書きされるリスクを避ける、本ファイル既存の方針と同じ）CSSのみで対応。
    関連記事は1ページ1箇所（記事下部）に一本化する。 */
 .pager-post-navi{display:none !important;}
+/* 【2026-09-19追記：関連記事の水増し補填廃止に伴う0件時の非表示】
+   fix_related_entries_query_args()側でタグ一致0件のときpost__in=[0]を
+   返すようにしたが、Cocoon純正のaside#related-entries自体は
+   is_related_entries_visible()という静的設定（クエリ結果を見ない）で
+   表示可否を決めているため、中身が0件でも見出し「関連記事」＋
+   「関連記事は見つかりませんでした。」という空の枠が残ってしまう。
+   テーマファイル（tmp/related-entries.php）は直接編集せず、実際に
+   カード（.related-entry-card-wrap）を1つも含まないasideをCSSの
+   :has()で丸ごと非表示にすることで対応する。 */
+#related-entries:not(:has(.related-entry-card-wrap)){display:none !important;}
+/* 【2026-09-19追記：記事冒頭の旧割引CTA枠の非表示】note-style-engagement.php
+   のprepend_archive_discount_box()が90日以上経過した有料note記事の
+   アイキャッチ直下に挿入する「💡 この記事は当サイトで買うのが一番
+   お得です！」という割引案内枠（.archive-discount-box）は、有料ライン
+   直前の統合案内ボックス（.nseb-purchase-guide）と内容が重複し、読者に
+   とって「案内が2箇所にある」混乱の元になっていたため非表示にした。
+   このPHP関数自体は削除せず（本文中に静的に挿入される既存の仕組みで、
+   価格情報の実体はここにしか無いため）、CSSでの表示制御のみで対応する。 */
+.archive-discount-box{display:none !important;}
 </style>
 <script>
 (function () {
