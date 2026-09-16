@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.26.0
+ * Version: 1.27.0
  * Author: junchan-world
  */
 
@@ -41,6 +41,17 @@ class Custom_Search_Category_Filter {
     // 絞り込み（DEFAULT_CHECKED）には含めないが、アーカイブページ単体は
     // 生きたページとして許可するため、リダイレクト判定でのみ個別に許可する。
     const NEWS_CATEGORY_ID = 2448;
+
+    // 【2026-09-18追記】関連記事（Cocoon純正のrelated-entries機能）から除外
+    // するカテゴリー。TweetTV（2447、アイキャッチ画像の無い「○/○(○) ニュース」
+    // という日次記事が大量に存在する旧カテゴリー）と、その子カテゴリーである
+    // tweettv_scenario（=CAT_MAP['tweettv_scenario']、2457）・
+    // deleted_tweet（=CAT_MAP['deleted_tweet']、2456）をまとめて除外する。
+    // WP_Queryのcategory__not_inは親カテゴリーIDだけでは子カテゴリーの投稿を
+    // 自動では除外しないため、3つのIDを個別に列挙する（クラス定数の配列内で
+    // 他の定数を参照する記法はPHPバージョンによって挙動差があるため、値の
+    // 対応はCAT_MAPの値をそのまま書き写す形にして安全側に倒す）。
+    const RELATED_ENTRIES_EXCLUDE_CATEGORY_IDS = array(2447, 2457, 2456);
 
     // 【2026-09-01追記、2026-09-02更新：テーマ別2階層カテゴリー】
     // categorize_articles_v2.py が作成する大カテゴリー名の一覧（9大分類×22小分類
@@ -120,6 +131,15 @@ class Custom_Search_Category_Filter {
         // サイドバー等の月別/年別アーカイブ一覧から、ARCHIVE_MIN_DATE より前の
         // （実際には存在しないはずの）年月を除外する。
         add_filter('getarchives_where', array($this, 'filter_archives_where'));
+
+        // 【2026-09-18追記：関連記事のランダム表示・ゴミ記事混入を是正】
+        // Cocoonテーマ本体（lib/related-entries.php）が公開しているフィルター
+        // フック。テーマファイルは直接編集しない（テーマ更新で上書きされる
+        // リスクを避ける、本ファイル内の既存の設計方針と同じ）。Cocoon側の
+        // get_additional_related_wp_query_args()がデフォルト優先度10で同じ
+        // フックに登録されているため、それより後（20）に登録し最終的な
+        // 上書き権を持たせる。
+        add_filter('get_related_wp_query_args', array($this, 'fix_related_entries_query_args'), 20);
 
         // 【2026-08-16 追記：「ニュース」カテゴリー復活・自動分類】
         // save_postはREST経由の新規作成時、note_full_titleメタが未反映の
@@ -750,6 +770,56 @@ class Custom_Search_Category_Filter {
     public function filter_archives_where($where) {
         global $wpdb;
         return $where . $wpdb->prepare(' AND post_date >= %s', self::ARCHIVE_MIN_DATE);
+    }
+
+    /**
+     * 【2026-09-18追記：関連記事のランダム表示・ゴミ記事混入を是正】
+     * 実機報告により、記事下の「関連記事」に以下2つの問題があることが判明した：
+     * ①アイキャッチ画像の無い、無関係な旧TweetTV JPの日次記事（「○/○(○) ニュース」
+     *   等）が大量に混入する。
+     * ②再読み込み・再アクセスのたびに表示される記事が入れ替わる。
+     *
+     * 【原因の特定】Cocoonテーマ（lib/related-entries.php、直接編集はしない。
+     * テーマ更新で上書きされるリスクを避ける方針は本ファイル既存の他の対応
+     * （redirect_legacy_category_archive等）と同じ）を調査した結果：
+     * - get_common_related_args()が `'orderby' => 'rand'` を無条件に設定して
+     *   おり、これが②の直接原因（毎回SQLのORDER BY RAND()で完全にランダムな
+     *   結果になる）。
+     * - 関連付けはカテゴリーまたはタグの一致のみで行われ、アイキャッチ画像の
+     *   有無やカテゴリーの「質」（TweetTVの日次投稿かどうか）は一切考慮されて
+     *   いない。TweetTV（ID 2447）は投稿数が2178件と非常に多く、noteやexblog
+     *   の記事とタグ・カテゴリーが偶然重なるだけで①のように大量に紛れ込む。
+     *
+     * 【対策】Cocoon本体が公開しているget_related_wp_query_argsフィルター
+     * （このフックはget_additional_related_wp_query_args()が優先度10で登録
+     * 済みのため、それより後の優先度20で登録し最終的な上書き権を持つ）で、
+     * WP_Queryの引数そのものを書き換える：
+     * ①ランダムソートを廃止し、公開日の新しい順という決定論的な並びにする
+     *   （毎回同じ記事が同じ順序で表示される）。
+     * ②アイキャッチ画像が無い記事（_thumbnail_idメタが存在しない）を除外する
+     *   meta_queryを追加する。
+     * ③TweetTV関連カテゴリー（RELATED_ENTRIES_EXCLUDE_CATEGORY_IDS）を
+     *   category__not_inで除外する。
+     */
+    public function fix_related_entries_query_args($args) {
+        $args['orderby'] = 'date';
+        $args['order'] = 'DESC';
+
+        if (!isset($args['meta_query']) || !is_array($args['meta_query'])) {
+            $args['meta_query'] = array();
+        }
+        $args['meta_query'][] = array(
+            'key'     => '_thumbnail_id',
+            'compare' => 'EXISTS',
+        );
+
+        $exclude = self::RELATED_ENTRIES_EXCLUDE_CATEGORY_IDS;
+        if (isset($args['category__not_in']) && is_array($args['category__not_in'])) {
+            $exclude = array_merge($args['category__not_in'], $exclude);
+        }
+        $args['category__not_in'] = $exclude;
+
+        return $args;
     }
 
     /**
