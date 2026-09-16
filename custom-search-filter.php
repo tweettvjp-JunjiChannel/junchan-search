@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.25.0
+ * Version: 1.26.0
  * Author: junchan-world
  */
 
@@ -426,32 +426,27 @@ class Custom_Search_Category_Filter {
      * - YouTube埋め込み（v=16w6vciEQ2g, list=PLKuq3LRJIIMM）… YouTube oEmbed
      *   APIで実際に存在・埋め込み可能であることを確認済み（チャンネル名
      *   「忍者トゥルーサー」が/links/ページのチャンネルと一致）。
-     * - Codoc月額読み放題プランへの導線は、サイドバーの既存ウィジェット
-     *   （#custom_html-2、Codoc公式cms.js埋め込み）を「二重埋め込み」せず、
-     *   アンカーリンク（#custom_html-2 へスクロール）で誘導する設計にした。
-     *   Codoc埋め込みは同一DOM IDの重複に弱く、過去に複数の不具合
-     *   （CLAUDE.md 13〜15項）を起こしている経緯があるため、同じスクリプト・
-     *   同じdiv idを2箇所に置く新規リスクを避けた。
+     * - Codoc月額読み放題プランへの導線について。当初はサイドバーの既存
+     *   ウィジェット（#custom_html-2、Codoc公式cms.js埋め込み）へアンカー
+     *   リンクで誘導していたが、後述の経緯によりサイドバー側のCodoc
+     *   ウィジェット自体を撤去したため、この導線は成立しなくなった。
      *
      * 【2026-09-10追記：「左記の」表現とサイドバー実位置の矛盾を修正】
-     * 前回実装のCodoc誘導カードは「左記の『月額読み放題プラン』の
-     * 『購入手続き』ボタンをクリックしてください」という文言＋
-     * #custom_html-2へのアンカースクロールボタンを常時表示していたが、
-     * 人間の実機目視で指摘を受け再調査した結果、このサイトのCocoonテーマは
-     * 960px未満のビューポート（スマホ含む）では`.sidebar`自体を通常の
-     * ドキュメントフロー上に一切描画しない（実機診断：is_visible()=False、
-     * bounding_box=None）ことが判明した。スマホでは画面下部の固定ナビ
-     * バー内「サイドバー」アイコンをタップして初めてオフキャンバス
-     * パネルとして表示される仕組みのため、①「左記の」という表現は
-     * スマホでは方向として意味を成さず、②アンカースクロールボタンも
-     * 非表示要素をスクロール対象にするだけで実質何も起きない、という
-     * 二重の実害があった。
-     * 対策として、Cocoonの実際のブレークポイント（960px、本ファイル内の
-     * `@media (min-width: 960px) { .sidebar{...} }` と一致させる）を境に、
-     * デスクトップ版（「左記の」＋アンカースクロールボタン、実際に機能する）
-     * とスマホ版（「画面下部のサイドバーアイコンをタップ」という、実際の
-     * 操作手順に即した文言。ボタンは出さない＝押しても何も起きない偽の
-     * ボタンを置かない）を、CSSの@mediaで排他的に出し分ける。
+     * デスクトップ／スマホでサイドバーの実位置が異なる（960px未満では
+     * `.sidebar`自体がオフキャンバスパネルでしか表示されない）ことが原因で、
+     * 「左記の」という表現・アンカースクロールボタンがデバイスによって
+     * 機能しない矛盾があったため、当時はデバイスごとに文言を出し分ける
+     * 対応をしていた。
+     *
+     * 【2026-09-17追記：Codoc配置原則（1ページ1箇所）に伴う全面刷新】
+     * サイドバーのCodocウィジェット自体を完全撤去した（note-style-
+     * engagement.phpのinsertPurchaseGuideに導線を一本化。CLAUDE.md記載の
+     * 経緯参照）ため、上記のデバイス別文言・アンカーボタンはいずれも
+     * 参照先を失い、「撤去したサイドバーを指す」という実態と合わない案内に
+     * なっていた。購入導線は現在、各記事詳細ページ本文中のCodocブロック
+     * 直前（有料記事）にのみ存在するため、ホームページのヒーローカードは
+     * 「読みたい記事を開けば購入・加入できる」という実態に即した単一の
+     * 案内文へ差し替え、デバイス別の出し分け・アンカーボタンは廃止した。
      */
     public function render_homepage_hero($query) {
         if (is_admin() || !$query->is_home() || !$query->is_main_query()) {
@@ -505,14 +500,6 @@ class Custom_Search_Category_Filter {
 .jw-hero-codoc .jw-hero-btn{background:#8a6d00;color:#fff;}
 .jw-hero-codoc-guide{font-weight:bold;padding:.8em 1em;border-radius:8px;background:#fff3cd;border:1px dashed #d4a017;font-size:1em;}
 @media (max-width:480px){.jw-hero-codoc-guide{font-size:.92em;}}
-/* 【2026-09-10追記】Cocoonの実ブレークポイント（960px）に合わせ、
-   デスクトップ（サイドバーが左に常時表示、アンカースクロールが実際に
-   機能する）とスマホ（サイドバーは画面下部ナビの「サイドバー」アイコンを
-   タップするまで非表示＝アンカースクロールしても何も起きない）とで、
-   文言とボタンの両方を排他的に出し分ける。同時に両方が見える状態は
-   絶対に作らない（.jw-hero-codoc-guide-desktopはボタンにも付与する）。 */
-@media (min-width:960px){.jw-hero-codoc-guide-mobile{display:none;}}
-@media (max-width:959px){.jw-hero-codoc-guide-desktop{display:none;}}
 </style>
 
 <div class="jw-hero-card jw-hero-broadcast">
@@ -539,9 +526,7 @@ class Custom_Search_Category_Filter {
 <div class="jw-hero-card jw-hero-codoc">
 <h2>📚 削除された幻のテキストアーカイブも、ここに蘇る</h2>
 <p>note等で一時公開・削除されてきた深層記事の数々を、Codoc月額読み放題プランで全文アーカイブ配信中。新着note記事は下の一覧からすぐにチェックできます。</p>
-<p class="jw-hero-codoc-guide jw-hero-codoc-guide-desktop">👈 左記の「月額読み放題プラン」の「購入手続き」ボタンをクリックしてください</p>
-<p class="jw-hero-codoc-guide jw-hero-codoc-guide-mobile">👇 画面下部のメニューから「サイドバー」をタップし、「月額読み放題プラン」の「購入手続き」ボタンをクリックしてください</p>
-<a class="jw-hero-btn jw-hero-codoc-guide-desktop" href="#custom_html-2">💳 月額読み放題プランへ移動する</a>
+<p class="jw-hero-codoc-guide">👉 各記事の本文内にある「月額読み放題プラン」からいつでもご加入いただけます。まずは読みたい記事を開いてみてください。</p>
 </div>
 </div>
         <?php
