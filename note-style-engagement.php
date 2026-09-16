@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.7.0
+ * Version: 4.8.0
  * Author: junchan-world
  */
 
@@ -604,6 +604,16 @@ button.nseb-card-badge:active{transform:scale(1.08);}
    2026-09-14実機調査で確認したセレクタ）は装飾が無く見落とされやすいため、
    太字・青文字・下線で見やすく補正する。 */
 .codoc-subscription-articlelist-login a{font-weight:bold !important;color:#1a4d8f !important;text-decoration:underline !important;font-size:1.05em !important;}
+/* 【2026-09-16追記：Codoc配置原則（1ページ1箇所）の徹底】auto_sync_blogs.py
+   のSUBSCRIPTION_UPSELL_BOX_TEMPLATEが記事冒頭に挿入する赤枠
+   （border:2px solid #ff7b7b が目印）は、無料記事では唯一の購読・復元
+   導線として必要（sidebar側のcodoc-subscriptionsウィジェットは撤去済み
+   のため）だが、有料記事ではCodocブロック直前の統合案内ボックス
+   （.nseb-purchase-guide、insertPurchaseGuide参照）と内容が重複する。
+   :has()で「.wp-block-codoc-codoc-blockを含む記事＝有料記事」の場合
+   のみ、この赤枠を非表示にする（本文の一括書き換えは行わず、CSSのみで
+   対応することで既存記事すべてに即座かつ安全に反映される）。 */
+.entry-content:has(.wp-block-codoc-codoc-block) div[style*="ff7b7b"]{display:none !important;}
 </style>
         <?php
     }

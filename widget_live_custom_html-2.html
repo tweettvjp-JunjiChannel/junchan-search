@@ -1,95 +1,22 @@
 <div id="nseb-account-guide-link-top" style="margin-bottom:10px;padding:8px 10px;background:#fdecea;border:1px solid #e6b0aa;border-radius:8px;text-align:center;">
 <a href="https://junchan-world.com/account/" style="color:#c0392b;font-weight:bold;text-decoration:none;font-size:0.86em;">🔧 購読の確認・解約／お問い合わせはこちら</a>
 </div>
-<script src="https://codoc.jp/js/cms.js" data-css="rainbow-square" data-usercode="tlWA9Gh9aA" charset="UTF-8" defer></script>
-<div id="codoc-subscription-oEplngWcvQ" class="codoc-subscriptions"></div>
-<!-- 【2026-09-15追記：導線一本化】以前ここにあった「すでに購入・
-     サブスク加入済みの方へ」案内ボックス（ログイン・購入復元の導線）は、
-     混乱の元になっていたため撤去した。案内・復元導線は記事詳細ページの
-     Codocブロック直前の統合案内ボックス（note-style-engagement.php
-     insertPurchaseGuide参照）に一本化してある。 -->
-<script>
-(function () {
-  // 【2026-09-07追記：月間サブスク解約後の利用期限ステータス表示】
-  // Codoc公式スクリプト(cms.js/cms-core.js)を実機で取得・解析した結果、
-  // このサブスクボタン（.codoc-siteSubscription-subscription 内の
-  // .codoc-btn）は、ログイン中ブラウザが当該サブスクを「所有している」
-  // （Vueコンポーネント内部の ownedSubscription フラグ）場合に限り、
-  // クラスへ "codoc-btn-disable" が追加されて灰色化することをソース上で
-  // 確認済み（サブスク購入エンドポイント自体には次回更新日・利用終了日は
-  // 一切含まれておらず、「現に利用権があるか」の真偽値しか取得できない。
-  // そのため、"継続中の現役購読" と "解約済みだが期限までは利用できる
-  // 状態" をこの灰色化だけから区別することは技術的に不可能と判明した）。
-  // よって、①ウィジェット内に万一具体的な日付テキストが検出できた場合の
-  // みそれを主役にした赤字の期限表示を行い、②検出できない場合（現状の
-  // 大半のケース）は「解約済み」等の確認しようのない状態を断定せず、
-  // 「現在ご利用いただけています」という常に真である事実と、正確な
-  // 次回更新日・解約状況の確認先（/account/）だけを案内する、読者を
-  // 不安にさせない安全な表示にする。
-  var DATE_PATTERN = /(\d{4}年)?\d{1,2}月\d{1,2}日/;
-  var CANCEL_HINT_PATTERN = /(解約|キャンセル|更新停止|利用終了|次回)/;
-  var STATUS_ID = 'nseb-codoc-sub-status';
-
-  function findButton() {
-    return document.querySelector('#custom_html-2 .codoc-siteSubscription-subscription .codoc-price .codoc-btn');
-  }
-  function findWidgetRoot() {
-    return document.querySelector('#custom_html-2 .codoc-siteSubscription-subscription');
-  }
-  function extractDateNearby(root) {
-    var text = root.textContent || '';
-    var m = DATE_PATTERN.exec(text);
-    if (!m) { return null; }
-    // 日付の前後60文字以内に解約関連語があるかを確認し、無関係な日付
-    // （記事タイトル中の数字等）を誤って拾わないようにする。
-    var idx = m.index;
-    var context = text.slice(Math.max(0, idx - 60), idx + 60);
-    if (!CANCEL_HINT_PATTERN.test(context)) { return null; }
-    return m[0];
-  }
-  function removeStatus() {
-    var el = document.getElementById(STATUS_ID);
-    if (el && el.parentNode) { el.parentNode.removeChild(el); }
-  }
-  function insertStatus(root, dateText) {
-    removeStatus();
-    var box = document.createElement('div');
-    box.id = STATUS_ID;
-    if (dateText) {
-      box.style.cssText = 'margin-top:10px;padding:8px 10px;background:#fdecea;border:2px solid #c0392b;border-radius:8px;text-align:center;';
-      box.innerHTML = '<span style="color:#c0392b;font-weight:bold;font-size:0.92em;">🔴 ' + dateText + 'まで読み放題（解約済み）</span>';
-    } else {
-      box.style.cssText = 'margin-top:10px;padding:8px 10px;background:#eafaf1;border:1px solid #2ecc71;border-radius:8px;text-align:center;';
-      box.innerHTML = '<span style="color:#1e8449;font-weight:bold;font-size:0.88em;">✅ 現在ご利用いただけています</span><br>'
-        + '<a href="https://junchan-world.com/account/" style="color:#c0392b;font-weight:bold;font-size:0.82em;text-decoration:underline;">▶ 正確な次回更新日・解約状況の確認はこちら</a>';
-    }
-    if (root.parentElement) { root.parentElement.insertBefore(box, root.nextSibling); }
-  }
-
-  var mo;
-  function check() {
-    var btn = findButton();
-    var root = findWidgetRoot();
-    if (!btn || !root) { removeStatus(); return; }
-    var owned = btn.classList.contains('codoc-btn-disable');
-    // 自分自身のDOM挿入・削除がMutationObserverを再度発火させ無限ループに
-    // なるのを防ぐため、DOM操作中だけ監視を一時停止する。
-    if (mo) { mo.disconnect(); }
-    if (!owned) {
-      removeStatus();
-    } else {
-      insertStatus(root, extractDateNearby(root));
-    }
-    if (mo) { mo.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] }); }
-  }
-
-  var target = document.querySelector('#custom_html-2') || document.body;
-  var debounceTimer = null;
-  mo = new MutationObserver(function () {
-    if (debounceTimer) { clearTimeout(debounceTimer); }
-    debounceTimer = setTimeout(check, 80);
-  });
-  mo.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
-  check();
-})();
-</script>
+<!-- 【2026-09-16追記：Codoc配置原則（1ページ1箇所）の徹底】以前ここにあった
+     codoc-subscriptions ウィジェット（#codoc-subscription-oEplngWcvQ）と
+     そのcms.js読み込み、およびそれに依存する購読ステータス表示スクリプトを
+     完全に撤去した。この同一DOM ID（oEplngWcvQ）の購読ウィジェットは、
+     note記事の本文冒頭（auto_sync_blogs.pyのSUBSCRIPTION_UPSELL_BOX_TEMPLATE）
+     にも常に埋め込まれており、記事詳細ページを開くとサイドバーと記事本文の
+     両方に同一IDのCodocウィジェットが同時にマウントされる状態になっていた
+     （Codocは同一DOM IDの重複マウントに弱く、過去に複数の不具合を起こして
+     いる。CLAUDE.md 14項参照）。今後はサイドバーには一切購読ウィジェットを
+     置かず、以下の2箇所のみを唯一の購読・購入導線とする：
+     ① 無料記事：本文冒頭の赤枠（auto_sync_blogs.py側、変更なし）
+     ② 有料記事：Codocブロック直前の統合案内ボックス
+        （note-style-engagement.php insertPurchaseGuide参照。有料記事側では
+        本文冒頭の赤枠自体もCSSで非表示化し、重複案内を防いでいる）
+     【既知の副作用】ホームページのヒーローセクション（custom-search-filter.php
+     render_homepage_hero）内の「💳 月額読み放題プランへ移動する」ボタンは
+     #custom_html-2 へのアンカースクロールだったが、遷移先の購読ボタン自体が
+     無くなったため、スクロールするだけで購入操作ができなくなる。このボタンの
+     再設計は本対応のスコープ外のため、次の対応時に見直すこと。 -->
