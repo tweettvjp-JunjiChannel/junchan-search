@@ -1,22 +1,36 @@
 <div id="nseb-account-guide-link-top" style="margin-bottom:10px;padding:8px 10px;background:#fdecea;border:1px solid #e6b0aa;border-radius:8px;text-align:center;">
 <a href="https://junchan-world.com/account/" style="color:#c0392b;font-weight:bold;text-decoration:none;font-size:0.86em;">🔧 購読の確認・解約／お問い合わせはこちら</a>
 </div>
-<!-- 【2026-09-16追記：Codoc配置原則（1ページ1箇所）の徹底】以前ここにあった
-     codoc-subscriptions ウィジェット（#codoc-subscription-oEplngWcvQ）と
-     そのcms.js読み込み、およびそれに依存する購読ステータス表示スクリプトを
-     完全に撤去した。この同一DOM ID（oEplngWcvQ）の購読ウィジェットは、
-     note記事の本文冒頭（auto_sync_blogs.pyのSUBSCRIPTION_UPSELL_BOX_TEMPLATE）
+<!-- 【2026-09-16追記、2026-09-17再構築：Codoc配置原則（1ページ1箇所）の徹底】
+     以前ここにあった codoc-subscriptions ウィジェット
+     （#codoc-subscription-oEplngWcvQ）とそのcms.js読み込みは完全に撤去した
+     （2026-09-16）。この同一DOM ID（oEplngWcvQ）の購読ウィジェットは、note
+     記事の本文冒頭（auto_sync_blogs.pyのSUBSCRIPTION_UPSELL_BOX_TEMPLATE）
      にも常に埋め込まれており、記事詳細ページを開くとサイドバーと記事本文の
      両方に同一IDのCodocウィジェットが同時にマウントされる状態になっていた
      （Codocは同一DOM IDの重複マウントに弱く、過去に複数の不具合を起こして
-     いる。CLAUDE.md 14項参照）。今後はサイドバーには一切購読ウィジェットを
-     置かず、以下の2箇所のみを唯一の購読・購入導線とする：
+     いる。CLAUDE.md 14項参照）。実際の購読・購入・復元の操作は、以下の2箇所
+     のみで行う：
      ① 無料記事：本文冒頭の赤枠（auto_sync_blogs.py側、変更なし）
      ② 有料記事：Codocブロック直前の統合案内ボックス
         （note-style-engagement.php insertPurchaseGuide参照。有料記事側では
         本文冒頭の赤枠自体もCSSで非表示化し、重複案内を防いでいる）
-     【既知の副作用】ホームページのヒーローセクション（custom-search-filter.php
-     render_homepage_hero）内の「💳 月額読み放題プランへ移動する」ボタンは
-     #custom_html-2 へのアンカースクロールだったが、遷移先の購読ボタン自体が
-     無くなったため、スクロールするだけで購入操作ができなくなる。このボタンの
-     再設計は本対応のスコープ外のため、次の対応時に見直すこと。 -->
+     下記のバナーはCodocのスクリプト・決済ボタンを一切含まない「静的な看板」
+     （画像＋説明文のみ）で、実際の手続きは上記2箇所へ誘導する案内役に徹する。
+     バナー画像はCodocの購読プラン設定画像をそのまま流用（storage.codoc.jp、
+     決済機能を持たない単なる<img>としての読み込みのため競合リスクは無い）。
+     custom-search-filter.php側のホームページヒーローセクションの誘導文言は
+     2026-09-17に別途修正済み（「読みたい記事を開けば購入・加入できる」に
+     統一）。 -->
+<div class="jw-sidebar-codoc-banner" style="border-radius:10px;overflow:hidden;border:2px solid #e6b422;margin-bottom:12px;">
+<img src="https://codoc.jp/storage/images/997875e2288002aceb6c/large.png" alt="マスコミとAIが隠す世界の【真相】300冊の宝島、月1000円で全公開" style="width:100%;height:auto;display:block;">
+<div style="padding:10px 12px 2px;background:#fffaf0;">
+<p style="margin:0;font-weight:bold;color:#333;font-size:0.9em;line-height:1.5;">🚨 マスコミとAIが隠す世界の【真相】<br>300冊以上の衝撃アーカイブに加え、これからも月千円で読み放題</p>
+</div>
+<div style="padding:10px 12px 12px;background:#fffaf0;font-size:0.8em;line-height:1.7;color:#444;">
+<p style="margin:0 0 5px;font-weight:bold;color:#8a6d00;">💡 ご利用・お手続きについて</p>
+<p style="margin:0 0 4px;">・新規ご購入：各記事の本文内にある案内枠から「購読プラン」または「単品購入」をお選びいただけます。</p>
+<p style="margin:0 0 8px;">・購入済みの復元：別端末やPCで閲覧する際は、各記事本文内の【ログインして購入済みを復元する】ボタンから再同期できます。</p>
+<p style="margin:0;font-weight:bold;text-align:center;color:#1a4d8f;">👉 まずはお好きな記事を1つ開いてお試しください</p>
+</div>
+</div>
