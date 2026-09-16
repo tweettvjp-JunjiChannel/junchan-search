@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.28.0
+ * Version: 1.29.0
  * Author: junchan-world
  */
 
@@ -815,13 +815,49 @@ class Custom_Search_Category_Filter {
      */
     public function fix_related_entries_query_args($args) {
         global $post;
-        $target_count = isset($args['posts_per_page']) && $args['posts_per_page'] ? (int) $args['posts_per_page'] : 6;
-        $current_id = ($post && isset($post->ID)) ? (int) $post->ID : 0;
+        // 【コードレビュー指摘対応】posts_per_pageが0や負値（WP_Queryの
+        // 「無制限」慣習である-1等）の場合はCocoon設定の意図しない値として
+        // 扱い、既定の6件にフォールバックする（そのまま使うと後段の
+        // 「count($selected) < $target_count」判定が常に真/偽どちらかに
+        // 固定され、本来の補填ロジックが機能しなくなるため）。
+        $target_count = (isset($args['posts_per_page']) && (int) $args['posts_per_page'] > 0)
+            ? (int) $args['posts_per_page']
+            : 6;
+
+        // 【2026-09-18追記：自記事の完全除外を堅牢化】単一のglobal $post参照
+        // だけに頼らず、現在の投稿IDを複数の信頼できる経路から集めて全て
+        // 除外リストへ入れる（いずれか1つが取得できていれば確実に除外できる
+        // ようにする冗長化。Cocoon側get_common_related_args()が既に
+        // 組み立てた$args['post__not_in']にも現在の投稿IDが含まれている
+        // はずなので、それもそのまま引き継ぐ）。
+        $current_ids = array();
+        if ($post && isset($post->ID)) {
+            $current_ids[] = (int) $post->ID;
+        }
+        $queried_id = get_queried_object_id();
+        if ($queried_id) {
+            $current_ids[] = (int) $queried_id;
+        }
+        if (!empty($args['post__not_in']) && is_array($args['post__not_in'])) {
+            foreach ($args['post__not_in'] as $id) {
+                $current_ids[] = (int) $id;
+            }
+        }
+        $current_ids = array_values(array_unique(array_filter($current_ids)));
+
+        // 【コードレビュー指摘対応】Cocoon純正のget_additional_related_wp_query_args()
+        // （優先度10）がテーマ設定「除外カテゴリー」（get_archive_exclude_category_ids()）
+        // に基づき$args['category__not_in']を既に設定している場合があるため、
+        // 上書きせずこちらの除外リストとマージする。
+        $exclude_categories = self::RELATED_ENTRIES_EXCLUDE_CATEGORY_IDS;
+        if (!empty($args['category__not_in']) && is_array($args['category__not_in'])) {
+            $exclude_categories = array_values(array_unique(array_merge($exclude_categories, $args['category__not_in'])));
+        }
 
         $base_args = array(
             'post_type'           => 'post',
             'post_status'         => 'publish',
-            'category__not_in'    => self::RELATED_ENTRIES_EXCLUDE_CATEGORY_IDS,
+            'category__not_in'    => $exclude_categories,
             'meta_query'          => array(
                 array('key' => '_thumbnail_id', 'compare' => 'EXISTS'),
             ),
@@ -836,7 +872,7 @@ class Custom_Search_Category_Filter {
 
         // ①同一カテゴリー/タグ優先（Cocoonが既に解決済みのcategory__in/tag__inをそのまま使う）
         $primary_args = $base_args;
-        $primary_args['post__not_in'] = array($current_id);
+        $primary_args['post__not_in'] = $current_ids;
         if (!empty($args['category__in'])) {
             $primary_args['category__in'] = $args['category__in'];
         } elseif (!empty($args['tag__in'])) {
@@ -851,9 +887,15 @@ class Custom_Search_Category_Filter {
         if (count($selected) < $target_count) {
             $fallback_args = $base_args;
             $fallback_args['posts_per_page'] = $target_count - count($selected);
-            $fallback_args['post__not_in'] = array_merge(array($current_id), $selected);
+            $fallback_args['post__not_in'] = array_merge($current_ids, $selected);
             $fallback_ids = (new WP_Query($fallback_args))->posts;
             $selected = array_merge($selected, $fallback_ids);
+        }
+
+        // 【念のための最終ガード】上記の除外条件をすり抜けて自記事が混入して
+        // いた場合に備え、最終選定リストからも明示的に取り除く。
+        if (!empty($current_ids)) {
+            $selected = array_values(array_diff($selected, $current_ids));
         }
 
         if (empty($selected)) {
@@ -913,6 +955,13 @@ class Custom_Search_Category_Filter {
 .tc-pjax-overlay{position:absolute;inset:0;background:rgba(255,255,255,0.5);z-index:10;cursor:progress;}
 /* 【2026-09-04追記：「最近の記事」で閲覧中タイトルの赤色ハイライト】 */
 #block-3 a.wp-block-latest-posts__post-title.nseb-recent-active{color:#d32f2f !important;font-weight:bold;}
+/* 【2026-09-18追記：関連記事との重複感を解消】Cocoon純正の「前後の記事」
+   ナビゲーション（.pager-post-navi）が関連記事6件の直下に表示され、前の
+   記事として関連記事1件目と同じ記事が再度出ることがあり、読者を混乱させる
+   という実機報告を受けて非表示にした。テーマファイルは直接編集せず（更新で
+   上書きされるリスクを避ける、本ファイル既存の方針と同じ）CSSのみで対応。
+   関連記事は1ページ1箇所（記事下部）に一本化する。 */
+.pager-post-navi{display:none !important;}
 </style>
 <script>
 (function () {
