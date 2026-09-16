@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.8.0
+ * Version: 4.9.0
  * Author: junchan-world
  */
 
@@ -18,7 +18,6 @@ class Note_Style_Engagement_Bar {
     // 【2026-09-02追記】一覧の「閲覧数(PV)順」ソート専用のキャッシュ
     // （PV_SORT_CACHE_KEYのコメント・handle_view参照）。
     const PV_SORT_CACHE_KEY = 'nseb_pv_sort_cache';
-    const SIDEBAR_SUBSCRIPTION_WIDGET_ID = 'custom_html-2';
     const CONTENT_SUBSCRIPTION_DOM_ID = 'codoc-subscription-oEplngWcvQ';
 
     // Codoc価格・購入数のキャッシュ用postmeta（WP-Cronで定期更新。
@@ -71,9 +70,16 @@ class Note_Style_Engagement_Bar {
         add_action('wp_head', array($this, 'print_frontend_css'));
         add_action('wp_footer', array($this, 'print_frontend_js'));
 
-        // 単一記事ページでは、記事本文側に埋め込むボタンと重複しないよう
-        // サイドバーのCodocサブスクウィジェットを非表示にする
-        add_filter('widget_display_callback', array($this, 'maybe_hide_sidebar_subscription_widget'), 10, 3);
+        // 【2026-09-17削除】以前はサイドバー（custom_html-2）にCodoc
+        // サブスクウィジェット本体があり、記事本文側の同一ウィジェットと
+        // 重複マウントしないようwidget_display_callbackで単一記事ページ
+        // 限定で非表示にしていた。custom_html-2からCodocウィジェット自体を
+        // 完全撤去し、Codocを一切含まない静的バナーへ置き換えたため、この
+        // フィルター自体が不要（かつ有害）になった。残したままだと、記事
+        // ページでcustom_html-2ウィジェット全体（account guide linkや新しい
+        // 静的バナーを含む）が丸ごと非表示になったまま、という新たな不具合
+        // を実機検証で発見したため削除した（maybe_hide_sidebar_subscription_widget
+        // 関数自体・SIDEBAR_SUBSCRIPTION_WIDGET_ID定数も削除済み）。
 
         // note記事（公開から90日以上経過したアーカイブ）の本文冒頭に、
         // 「当サイトで買うのが一番お得」というアピールボックスを挿入する。
@@ -1824,20 +1830,6 @@ button.nseb-card-badge:active{transform:scale(1.08);}
             return $content;
         }
         return substr($content, $close_pos + strlen('</div>'));
-    }
-
-    /**
-     * 記事本文中の赤い案内枠には既にサブスク登録ボタン（Codocウィジェットと同一の
-     * subscriptions要素）を直接埋め込んでいるため、単一記事ページに限り、
-     * サイドバーの同ウィジェットは重複表示を避けるために非表示にする
-     * （Codoc側の仕様上、同一subscriptionコードの要素は1つしかマウントされないため、
-     * 表示のみ本文側を優先させる）。
-     */
-    public function maybe_hide_sidebar_subscription_widget($instance, $widget, $args) {
-        if (is_single() && get_post_type() === 'post' && isset($args['widget_id']) && $args['widget_id'] === self::SIDEBAR_SUBSCRIPTION_WIDGET_ID) {
-            return false;
-        }
-        return $instance;
     }
 
     /**
