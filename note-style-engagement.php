@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.6.0
+ * Version: 4.7.0
  * Author: junchan-world
  */
 
@@ -572,20 +572,32 @@ button.nseb-card-badge:active{transform:scale(1.08);}
 #nseb-my-library-tabs{display:flex;flex-wrap:wrap;gap:.5em;justify-content:center;}
 .nseb-library-tab{display:inline-block;padding:.5em 1em;border-radius:999px;background:#f1f1f1;color:#555;text-decoration:none;font-size:.92em;font-weight:bold;white-space:nowrap;}
 .nseb-library-tab.is-active{background:#333;color:#fff;}
-/* 【2026-09-14追記：購入復元ボタンの新設、2026-09-15追記：導線一本化】
-   Codocブロック直前に設置する統合案内ボックス。以前は「購入を復元」導線
-   単体の小さなバナーだったが、サブスク・単品購入の案内をサイドバーから
-   全廃してこの1箇所へ集約した（導線一本化）。純正の「ログインして購入を
-   復元」導線が地味で見落とされやすいという実機報告を受けて追加した
-   代替導線も、このボックスの一部として引き続き提供する。 */
-.nseb-purchase-guide{margin:0 0 1em;padding:1.2em 1.4em;border-radius:10px;background:#fffaf0;border:2px solid #e6b422;}
-.nseb-purchase-guide-title{margin:0 0 .8em;font-size:1.1em;font-weight:bold;color:#8a6d00;text-align:center;}
+/* 【2026-09-14追記：購入復元ボタンの新設、2026-09-15追記：導線一本化、
+   2026-09-16追記：UX再設計】Codocブロック直前に設置する統合案内ボックス。
+   サブスク・単品購入の案内をサイドバーから全廃してこの1箇所へ集約した
+   （導線一本化）。2026-09-16の再設計では、「新規購入の案内（①未購入者
+   向け）」と「別端末での復元案内（③別端末/認証切れの購入者向け）」を
+   視覚的に完全分離した：前者は暖色（ゴールド）のヘッダー・本文エリア、
+   後者は薄いグレー背景の別ブロックとして区切り線の下に配置し、かつ
+   復元導線には「本登録したデバイス以外で初めて読む場合は」という前置き
+   文を必ず添えることで、未購入の新規読者が「いきなり復元ボタンが出て
+   混乱する」（実機報告）事態を防ぐ。復元ボタン自体もグレー系の目立たない
+   配色にし、上部の暖色エリア（新規購入導線）との主従関係を明確にした。 */
+.nseb-purchase-guide{margin:0 0 1em;border-radius:10px;overflow:hidden;border:2px solid #e6b422;}
+.nseb-purchase-guide-header{display:flex;align-items:center;gap:.7em;padding:1em 1.2em .7em;background:#fffaf0;}
+.nseb-purchase-guide-avatar{width:42px;height:42px;flex:0 0 auto;border-radius:50%;object-fit:cover;border:2px solid #e6b422;}
+.nseb-purchase-guide-title{margin:0;font-size:1.05em;font-weight:bold;color:#8a6d00;}
+.nseb-purchase-guide-body{padding:0 1.2em 1.1em;background:#fffaf0;}
 .nseb-purchase-guide-section{margin:0 0 1em;}
+.nseb-purchase-guide-section:last-child{margin-bottom:0;}
 .nseb-purchase-guide-heading{margin:0 0 .3em;font-weight:bold;color:#d32f2f;font-size:.98em;}
 .nseb-purchase-guide-text{margin:0;font-size:.92em;color:#333;line-height:1.7;}
 .nseb-purchase-guide-note{display:block;margin-top:.3em;font-size:.85em;color:#666;}
 .nseb-purchase-guide-note a{color:#1a4d8f;font-weight:bold;}
-.nseb-purchase-guide-btn{display:flex;width:100%;box-sizing:border-box;align-items:center;justify-content:center;gap:.4em;padding:.8em 1.4em;border-radius:8px;background:#1a4d8f;color:#fff;font-weight:bold;font-size:1em;border:none;cursor:pointer;min-height:48px;}
+.nseb-purchase-guide-divider{height:1px;background:#e0d3a8;}
+.nseb-purchase-guide-restore{padding:1em 1.2em;background:#f0f0f0;}
+.nseb-purchase-guide-restore-text{margin:0 0 .7em;font-size:.85em;color:#555;line-height:1.6;}
+.nseb-purchase-guide-btn{display:flex;width:100%;box-sizing:border-box;align-items:center;justify-content:center;gap:.4em;padding:.75em 1.4em;border-radius:8px;background:#666;color:#fff;font-weight:bold;font-size:.95em;border:none;cursor:pointer;min-height:46px;}
 .nseb-purchase-guide-btn:hover{opacity:.9;}
 .nseb-purchase-guide-btn:disabled{opacity:.6;cursor:wait;}
 /* Codoc純正「ログインして購入を復元」リンク（.codoc-subscription-articlelist-login a、
@@ -988,25 +1000,40 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     return a ? a.getAttribute('href') : null;
   }
 
+  // サイト共通ヘッダーで使われている順ちゃんの顔写真（site-branding側の
+  // insertHeaderPhoto()と同一の画像URL）を、このボックスの見出し横にも
+  // 小さな円形アイコンとして流用する（読者に馴染みのある「誰が書いた
+  // 案内か」を一目で伝えるため）。
+  var GUIDE_AVATAR_URL = 'https://junchan-world.com/wp-content/uploads/2026/08/junchan-header-photo.png';
+
   function insertPurchaseGuide(container) {
     if (document.querySelector('.nseb-purchase-guide')) { return; } // 二重挿入防止
     var noteUrl = findNoteOriginalUrl();
     var noteNoteHtml = noteUrl
-      ? '<span class="nseb-purchase-guide-note">（※noteアカウントでご購入・閲覧したい方は<a href="' + noteUrl.replace(/"/g, '&quot;') + '" target="_blank" rel="noopener">【note元記事ページ】</a>へ）</span>'
+      ? '<span class="nseb-purchase-guide-note">（※noteアカウントでお支払い・閲覧したい方は<a href="' + noteUrl.replace(/"/g, '&quot;') + '" target="_blank" rel="noopener">【note元記事ページ】</a>へ）</span>'
       : '';
     var guide = document.createElement('div');
     guide.className = 'nseb-purchase-guide';
     guide.innerHTML =
-      '<p class="nseb-purchase-guide-title">💡 有料記事の閲覧・ご購入について</p>'
+      '<div class="nseb-purchase-guide-header">'
+      + '<img class="nseb-purchase-guide-avatar" src="' + GUIDE_AVATAR_URL + '" alt="順ちゃんワールド" loading="lazy">'
+      + '<p class="nseb-purchase-guide-title">💡 有料記事の閲覧・ご購入について</p>'
+      + '</div>'
+      + '<div class="nseb-purchase-guide-body">'
       + '<div class="nseb-purchase-guide-section">'
       + '<p class="nseb-purchase-guide-heading">🌟 【当サイト限定】全記事読み放題（月額1,000円）</p>'
-      + '<p class="nseb-purchase-guide-text">過去記事（300冊以上）もすべて読み放題になります。下の枠内にある「購読プランを購入」からお手続きください。</p>'
+      + '<p class="nseb-purchase-guide-text">過去記事（300冊以上）もすべて読み放題になります。この枠に続く「購読プランを購入」ボタンからお手続きください。</p>'
       + '</div>'
       + '<div class="nseb-purchase-guide-section">'
       + '<p class="nseb-purchase-guide-heading">この記事だけを単品で読みたい方</p>'
-      + '<p class="nseb-purchase-guide-text">下の枠内にある「記事を購入」ボタンからお読みいただけます。' + noteNoteHtml + '</p>'
+      + '<p class="nseb-purchase-guide-text">この枠に続く「記事を購入」ボタンからお読みいただけます。' + noteNoteHtml + '</p>'
       + '</div>'
-      + '<button type="button" class="nseb-purchase-guide-btn">🔄 ログインして購入を復元する</button>';
+      + '</div>'
+      + '<div class="nseb-purchase-guide-divider"></div>'
+      + '<div class="nseb-purchase-guide-restore">'
+      + '<p class="nseb-purchase-guide-restore-text">※パソコンやスマホなど、本登録したデバイス以外で初めて読む場合は、下記のボタンを押してください。</p>'
+      + '<button type="button" class="nseb-purchase-guide-btn">🔄 ログインして購入済みを復元する</button>'
+      + '</div>';
     container.parentNode.insertBefore(guide, container);
     var btn = guide.querySelector('.nseb-purchase-guide-btn');
     btn.addEventListener('click', function () {
