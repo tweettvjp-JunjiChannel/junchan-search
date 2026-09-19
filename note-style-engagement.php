@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.11.0
+ * Version: 4.13.0
  * Author: junchan-world
  */
 
@@ -953,6 +953,14 @@ button.nseb-card-badge:active{transform:scale(1.08);}
         node.style.display = 'none';
       }
     }
+
+    // 【2026-09-20追記：統合案内枠が購入・アンロック後も残る不具合の修正】
+    // insertPurchaseGuide()/initRestoreBanner() がCodocブロック直前に挿入する
+    // 「有料記事の閲覧・ご購入について」の案内枠（.nseb-purchase-guide）は、
+    // 挿入時点では購入状態を見ておらず常に表示される。この関数はアンロック
+    // 済みと判定できた時点で呼ばれるため、ここで一緒に非表示にする。
+    var guide = content.querySelector('.nseb-purchase-guide');
+    if (guide) { guide.style.display = 'none'; }
   }
 
   // 【2026-08-14追記：購入済み状態の検出】このサイトにはログイン機能が無いため
@@ -1090,6 +1098,31 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     var container = document.querySelector('.wp-block-codoc-codoc-block');
     if (!container) { return; }
     insertPurchaseGuide(container);
+  }
+
+  // 【2026-09-20追記：購入検知がステータスバー消失に巻き込まれて機能停止する
+  // 不具合の修正】checkCodocPurchaseState()（購入検知・hideUpsellBannersに
+  // よる案内枠の自動非表示を含む）は、これまでinitStatusBar()内でしか
+  // 呼ばれておらず、initStatusBar()は冒頭で`.nseb-status-bar[data-post-id]`
+  // が無いと即returnする。別ウィジェット（サイドバー検索ボックス、
+  // custom_html-3）のfixSingleArticleTitle()がh1.textContentを丸ごと
+  // 書き換えることで.nseb-status-bar自体が消えるケース（note_full_titleへの
+  // 置換が起きる95文字超のタイトルで頻発。CLAUDE.mdに既知の競合として記載）
+  // では、ステータスバーの見た目が崩れるだけでなく、購入検知そのものが
+  // 一度も走らなくなり、案内枠の自動非表示（本チケットの本題）まで機能停止
+  // していたことを実機で確認した（見た目の不具合だと思われていたが、
+  // 実際には機能面にも波及する重大な副作用だった）。ステータスバーの見た目
+  // 修復は別問題として残すが、購入検知という機能面だけは.nseb-status-bar
+  // の生死に依存させないよう、body classから取得できるpostId
+  // （getCurrentPostIdFromBody。関連記事の絞り込みで既に使っている手段と
+  // 同じ、h1の外側にあるため巻き添えを受けない）を使って独立に実行する。
+  // .nseb-status-barが生きている記事ではinitStatusBar側が既に呼ぶため、
+  // ここでは二重のMutationObserverを避けるためスキップする。
+  function ensurePurchaseDetectionFallback() {
+    if (document.querySelector('.nseb-status-bar[data-post-id]')) { return; }
+    var postId = getCurrentPostIdFromBody();
+    if (!postId) { return; }
+    checkCodocPurchaseState(postId);
   }
 
   // 【2026-09-17追記：関連記事の「絞り込み時」出し分け】
@@ -1767,6 +1800,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     initCardBadges();
     wireMyLibraryLinks();
     initRestoreBanner();
+    ensurePurchaseDetectionFallback();
     applyRelatedEntriesContextOverride();
   }
   // 【2026-09-02追記：PJAX対応】custom-search-filter.phpのPJAX（#mainのみを

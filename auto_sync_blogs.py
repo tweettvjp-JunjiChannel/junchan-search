@@ -677,6 +677,49 @@ NOTE_BODY_SELECTORS = [
 ]
 
 
+def dedupe_redundant_bare_link_before_embed(html: str) -> str:
+    """
+    【2026-09-20追記：動画/リンクの二重展開・タイムスタンプ消失対策】
+    note.comの編集画面でURLを貼ると、著者が「URLをそのまま本文に貼った跡」
+    （<p><a href="URL">URL</a></p>、YouTube・ツイキャス等の時間指定
+    （?t=）付きURLも含む）と、その直後の「実際の埋め込みカード/プレーヤー」
+    （<figure data-src="URL" embedded-service="...">...）の両方が本文に
+    残っているケースがある（実機確認：nb8e29ddba925のツイキャス時間指定
+    リンクで、著者が参照用にURLをテキストとして貼った直後、同じURLを
+    別途カード埋め込みしていた）。前者は後段のCocoon側のレンダリングで
+    後者と紛らわしい見た目の重複要素になり、読者には「動画/カードが2つ
+    並んでいる」ように見える。両方とも同じURLを指しているだけの冗長な
+    記述のため、埋め込み側（figure）を正として、直前に隣接する「URLだけの
+    裸リンク段落」は削除する。取り除くのはリンクのみで、embedded-service
+    の種類（youtube/external-article/twitter等）は問わない。
+    """
+    if "<figure" not in html:
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    changed = False
+    for figure in soup.find_all("figure"):
+        target_url = (figure.get("data-src") or "").strip()
+        if not target_url:
+            continue
+        prev = figure.find_previous_sibling()
+        # note.com が区切りとして挟む空段落（<p id="..."></p>）は読み飛ばす
+        while prev is not None and prev.name == "p" and not prev.get_text(strip=True) and prev.find("a") is None:
+            prev = prev.find_previous_sibling()
+        if prev is None or prev.name != "p":
+            continue
+        links = prev.find_all("a", href=True)
+        if len(links) != 1:
+            continue  # 他のリンクや文言も含む段落は誤削除防止のため対象外
+        a = links[0]
+        if prev.get_text(strip=True) != a.get_text(strip=True):
+            continue  # リンク以外の文言を含む場合は対象外
+        if a["href"].strip() != target_url:
+            continue  # 同じURLへの参照でなければ対象外
+        prev.decompose()
+        changed = True
+    return str(soup) if changed else html
+
+
 def fetch_note_body_html(page, url: str) -> str:
     page.goto(url, wait_until="load", timeout=30000)
     try:
@@ -698,6 +741,7 @@ def fetch_note_body_html(page, url: str) -> str:
     except Exception:
         pass
     html = body_loc.inner_html()
+    html = dedupe_redundant_bare_link_before_embed(html)
     html = rebuild_note_toc(html)
     return convert_external_article_embeds_to_blogcards(html)
 
