@@ -677,21 +677,67 @@ NOTE_BODY_SELECTORS = [
 ]
 
 
-def dedupe_redundant_bare_link_before_embed(html: str) -> str:
+VIDEO_TIMESTAMP_HOSTS = {
+    "youtube.com", "www.youtube.com", "m.youtube.com",
+    "youtu.be", "www.youtu.be",
+    "twitcasting.tv", "www.twitcasting.tv",
+}
+
+
+def protect_video_timestamp_links(html: str) -> str:
     """
-    【2026-09-20追記：動画/リンクの二重展開・タイムスタンプ消失対策】
-    note.comの編集画面でURLを貼ると、著者が「URLをそのまま本文に貼った跡」
-    （<p><a href="URL">URL</a></p>、YouTube・ツイキャス等の時間指定
-    （?t=）付きURLも含む）と、その直後の「実際の埋め込みカード/プレーヤー」
-    （<figure data-src="URL" embedded-service="...">...）の両方が本文に
-    残っているケースがある（実機確認：nb8e29ddba925のツイキャス時間指定
-    リンクで、著者が参照用にURLをテキストとして貼った直後、同じURLを
-    別途カード埋め込みしていた）。前者は後段のCocoon側のレンダリングで
-    後者と紛らわしい見た目の重複要素になり、読者には「動画/カードが2つ
-    並んでいる」ように見える。両方とも同じURLを指しているだけの冗長な
-    記述のため、埋め込み側（figure）を正として、直前に隣接する「URLだけの
-    裸リンク段落」は削除する。取り除くのはリンクのみで、embedded-service
-    の種類（youtube/external-article/twitter等）は問わない。
+    【2026-09-20修正：時間指定テキストリンクは削除ではなく保護する】
+    note元記事の構造は、①YouTube/ツイキャス等の時間指定（?t=）付き
+    テキストリンクと、②その直後の実際の埋め込み動画・カードの2つで
+    構成されている。以前（2026-09-20時点のc17bea9）はこれを「同じURLへの
+    冗長な重複」とみなして①のテキストリンクごと削除する実装
+    （dedupe_redundant_bare_link_before_embed）をしていたが、これは仕様の
+    誤認だった。①は「指定秒数へ飛ぶための本来必要なテキストリンク」で
+    あり、消してはならない。
+
+    本来の課題は「①のテキストリンクがWordPress側で勝手にoEmbed展開され、
+    ②の埋め込みと合わせて動画が2連打されること」であって、リンクの
+    存在そのものではない。そのため、時間指定パラメータ（?t=）を含む
+    YouTube/ツイキャスへの<a>タグは、oEmbedの自動展開を確実に防ぐ
+    明示的なHTMLリンク（target="_blank" rel="noopener noreferrer"）として
+    保護しつつ、本文にそのまま残す。リンクを削除する処理は一切行わない。
+    """
+    if "<a " not in html and "<a>" not in html:
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    changed = False
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if "t=" not in href:
+            continue
+        try:
+            host = urlsplit(href).netloc.lower()
+        except ValueError:
+            continue
+        if host not in VIDEO_TIMESTAMP_HOSTS:
+            continue
+        if a.get("target") != "_blank":
+            a["target"] = "_blank"
+            changed = True
+        rel_tokens = set((a.get("rel") or []) if isinstance(a.get("rel"), list) else (a.get("rel") or "").split())
+        needed = {"noopener", "noreferrer"}
+        if not needed.issubset(rel_tokens):
+            a["rel"] = " ".join(sorted(rel_tokens | needed))
+            changed = True
+    return str(soup) if changed else html
+
+
+def ensure_visible_timestamp_link_before_embed(html: str) -> str:
+    """
+    【2026-09-20修正】note元記事の「①時間指定テキストリンク→②埋め込み動画」
+    という構成を常に再現する。note.com側の編集画面によっては、時間指定
+    （?t=）付きのYouTube/ツイキャス埋め込みが<figure data-src="URL?t=N">
+    としてのみ存在し、URL自体は本文中の見える位置には一切表示されない
+    （data-src属性の中にしか残らない）ケースがある。この場合、埋め込み
+    プレーヤー自体は正しく指定秒数から再生されるが、読者が指定秒数の
+    URLをコピー・共有する手段が本文上から失われてしまう。埋め込み直前に
+    まだ同じURLへのテキストリンクが無ければ、クリック可能な<a>タグ
+    （target="_blank" rel="noopener noreferrer"）として明示的に生成する。
     """
     if "<figure" not in html:
         return html
@@ -699,23 +745,28 @@ def dedupe_redundant_bare_link_before_embed(html: str) -> str:
     changed = False
     for figure in soup.find_all("figure"):
         target_url = (figure.get("data-src") or "").strip()
-        if not target_url:
+        if not target_url or "t=" not in target_url:
             continue
+        try:
+            host = urlsplit(target_url).netloc.lower()
+        except ValueError:
+            continue
+        if host not in VIDEO_TIMESTAMP_HOSTS:
+            continue
+
         prev = figure.find_previous_sibling()
-        # note.com が区切りとして挟む空段落（<p id="..."></p>）は読み飛ばす
         while prev is not None and prev.name == "p" and not prev.get_text(strip=True) and prev.find("a") is None:
             prev = prev.find_previous_sibling()
-        if prev is None or prev.name != "p":
-            continue
-        links = prev.find_all("a", href=True)
-        if len(links) != 1:
-            continue  # 他のリンクや文言も含む段落は誤削除防止のため対象外
-        a = links[0]
-        if prev.get_text(strip=True) != a.get_text(strip=True):
-            continue  # リンク以外の文言を含む場合は対象外
-        if a["href"].strip() != target_url:
-            continue  # 同じURLへの参照でなければ対象外
-        prev.decompose()
+        if prev is not None and prev.name == "p":
+            existing_links = prev.find_all("a", href=True)
+            if len(existing_links) == 1 and existing_links[0]["href"].strip() == target_url:
+                continue  # 既にテキストリンクが存在する
+
+        p = soup.new_tag("p")
+        a = soup.new_tag("a", href=target_url, target="_blank", rel="noopener noreferrer")
+        a.string = target_url
+        p.append(a)
+        figure.insert_before(p)
         changed = True
     return str(soup) if changed else html
 
@@ -741,7 +792,8 @@ def fetch_note_body_html(page, url: str) -> str:
     except Exception:
         pass
     html = body_loc.inner_html()
-    html = dedupe_redundant_bare_link_before_embed(html)
+    html = protect_video_timestamp_links(html)
+    html = ensure_visible_timestamp_link_before_embed(html)
     html = rebuild_note_toc(html)
     return convert_external_article_embeds_to_blogcards(html)
 
