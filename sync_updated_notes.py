@@ -16,34 +16,48 @@ auto_sync_blogs.sync_note_updates() と同じく、本文HTMLを実際に取得�
 ウィンドウ）だけ変えてラップする形で実装している
 （sync_monthly_maintenance.py と同じ設計方針）。
 
+【2026-09-20追記：デフォルトを全件対象に変更】
+「差分がない記事はスキップするので全件対象でも短時間で終わる」という
+想定は誤り。差分の有無を判定するにはどのみち全記事についてnote.comへ
+実際にアクセスし本文を取得する必要があり、この「判定コスト」自体は
+スキップできない（スキップできるのは判定後の「書き込み」だけ）。
+実機の全件バックフィル（backfill_video_timestamp_links.py）の実測値
+から、全363件の確認には約3〜3.5時間かかると推定される。
+この見積りをオーナーに報告した上で、「週次の日常バッチ（sync_weekly.py）
+には組み込まず、全件差分チェックは独立した専用バッチ
+（全件差分同期.bat）として、夜間放置等の任意タイミングで実行する」
+という運用方針が確定した。デフォルト（引数なし）は全件を対象にし、
+軽量に済ませたい場合のみ --recent-days で期間を絞れるようにする。
+
 【対象範囲】
-- 引数なし（デフォルト）: 公開から90日以内の記事のみを対象に本文を
-  再取得し、ハッシュ比較する。90日以内の記事数は通常数十件程度のため、
-  1回のプロセス実行で問題なく完走できる。
-- --all: 全note記事（約360件）が対象。360件規模の連続Playwright操作は
-  メモリ逼迫でバックグラウンドプロセスが強制終了するリスクがあることを
-  backfill_video_timestamp_links.py の運用で実機確認済みのため、
-  --batch-size による分割実行に対応する。1つのバッチを処理し終えたら
-  プロセスを正常終了し（OSレベルでメモリを完全解放するため）、シェル側
-  で「未確認の記事が無くなるまで本プロセスを繰り返し起動する」運用を
-  想定する。終了コード: 0=今回の全件確認サイクルが完了、
-  2=まだ未確認の記事が残っている。
+- 引数なし（デフォルト）: 全note記事（約360件）が対象。360件規模の
+  連続Playwright操作はメモリ逼迫でプロセスが強制終了するリスクがある
+  ことをbackfill_video_timestamp_links.pyの運用で実機確認済みのため、
+  --batch-sizeによる分割実行に対応する。1つのバッチを処理し終えたら
+  プロセスを正常終了し（OSレベルでメモリを完全解放するため）、バッチ
+  ファイル側で「未確認の記事が無くなるまで本プロセスを繰り返し起動
+  する」ループを組んで使う。終了コード: 0=今回の全件確認サイクルが
+  完了、2=まだ未確認の記事が残っている。
   一時的な進捗ファイル（sync_updated_notes_progress.json）で「今回の
   全件確認サイクルで、本文を実際に確認済みの記事キー」を記録し、
   サイクルが完全に完了した時点で自動的に削除する。
-  【重要】これは backfill_*.py の進捗ファイルのような恒久的なスキップ
+  【重要】これはbackfill_*.pyの進捗ファイルのような恒久的なスキップ
   記録ではない。本文が変わっていない記事も「確認はした」という記録が
-  一度きり残るだけで、次に --all を実行するときは必ずゼロから
+  一度きり残るだけで、次に全件モードを実行するときは必ずゼロから
   やり直す（そうしないと2回目以降の定期実行で何も検知しなくなる）。
+- --recent-days N: 公開からN日以内の記事のみを対象にする軽量モード。
+  対象件数が少ないため（90日以内で数十件程度）、1回のプロセス実行で
+  問題なく完走できる。
 
 実行方法:
-    python sync_updated_notes.py                                    # ドライラン（直近90日）
-    python sync_updated_notes.py --execute                           # 本番実行（直近90日）
-    python sync_updated_notes.py --execute --limit 5                 # 件数を絞った試験実行
-    python sync_updated_notes.py --execute --all --batch-size 30     # 全件を30件ずつ分割実行
-    python sync_updated_notes.py --execute --all                     # 全件を1回で実行（試験用途以外は非推奨）
+    python sync_updated_notes.py --execute --batch-size 30   # 全件を30件ずつ分割実行（通常運用はこれ）
+    python sync_updated_notes.py --recent-days 90              # 直近90日のみドライラン（軽量・試験向け）
+    python sync_updated_notes.py --execute --recent-days 90    # 直近90日のみ本番実行
+    python sync_updated_notes.py --execute --limit 5           # 件数を絞った試験実行
 
-デスクトップ等から実行する場合は「note差分同期（直近90日）.bat」を使用する。
+デスクトップ等から実行する場合は「全件差分同期.bat」を使用する
+（夜間放置向け。バッチ分割ループを内蔵しているため、これ単体で
+最後まで自動的に完走する）。
 """
 
 from __future__ import annotations
@@ -59,8 +73,6 @@ import auto_sync_blogs as core
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROGRESS_PATH = SCRIPT_DIR / "sync_updated_notes_progress.json"
-
-DEFAULT_WINDOW_DAYS = 90
 
 
 def load_checked_keys() -> set[str]:
@@ -105,14 +117,17 @@ def report_result(log_rows: list[dict], execute: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="note過去記事の差分自動検知・更新")
     parser.add_argument("--execute", action="store_true", help="実際に変更を行う（指定しない場合はドライラン）")
-    parser.add_argument("--all", action="store_true", help="直近90日ではなく全note記事（約360件）を対象にする")
+    parser.add_argument(
+        "--recent-days", type=int, default=None,
+        help="指定した場合、公開からこの日数以内の記事のみを対象にする軽量モード（省略時は全note記事が対象）",
+    )
     parser.add_argument("--limit", type=int, default=None, help="対象件数の上限（試験実行用）")
     parser.add_argument(
         "--batch-size", type=int, default=None,
-        help="--all指定時のみ有効。この回で本文を確認する最大件数。指定件数を確認したら"
-             "プロセスを正常終了する（メモリを完全に解放するため、シェル側で本プロセスごと"
-             "繰り返し起動する運用を想定）。終了コード: 0=今回のサイクルで全件確認完了、"
-             "2=まだ未確認の記事が残っている。",
+        help="全件モード（--recent-days未指定時）のみ有効。この回で本文を確認する最大件数。"
+             "指定件数を確認したらプロセスを正常終了する（メモリを完全に解放するため、"
+             "バッチファイル側で本プロセスごと繰り返し起動する運用を想定）。"
+             "終了コード: 0=今回のサイクルで全件確認完了、2=まだ未確認の記事が残っている。",
     )
     args = parser.parse_args()
 
@@ -120,8 +135,9 @@ def main() -> None:
     wp = core.WP(creds["site_url"], creds["username"], creds["application_password"])
     state = core.load_state()
 
+    is_full_scan = args.recent_days is None
     mode = "本番実行（--execute）" if args.execute else "ドライラン（変更なし）"
-    scope = "全note記事（約360件）" if args.all else f"直近{DEFAULT_WINDOW_DAYS}日以内の記事"
+    scope = "全note記事（約360件）" if is_full_scan else f"直近{args.recent_days}日以内の記事"
     print("=" * 60)
     print(f"note過去記事 差分自動検知・更新  実行モード: {mode}")
     print(f"対象範囲: {scope}")
@@ -133,22 +149,21 @@ def main() -> None:
     articles = core.fetch_note_article_list()
     print(f"note公開済み記事一覧を取得しました: {len(articles)}件")
 
-    if not args.all:
-        # 通常モード：直近90日以内のみが対象のため、件数が少なく1回のプロセスで完走できる。
+    if not is_full_scan:
+        # 軽量モード：対象件数が少ないため1回のプロセスで完走できる。
         log_rows = core.sync_note_updates(
             wp, articles, state, args.execute, args.limit, link_maps,
-            window_days=DEFAULT_WINDOW_DAYS,
+            window_days=args.recent_days,
         )
         core.save_state(state)
         report_result(log_rows, args.execute)
         return
 
-    # --all モード：全件対象。360件規模のためバッチ分割に対応する。
+    # 全件モード（デフォルト）：360件規模のためバッチ分割に対応する。
     checked = load_checked_keys()
     pending = [a for a in articles if a["key"] not in checked]
     print(f"今回のサイクルで未確認: {len(pending)}件（{len(checked)}件は確認済み）")
 
-    remaining_after_this_batch = pending
     if args.batch_size:
         batch = pending[:args.batch_size]
         remaining_after_this_batch = pending[args.batch_size:]

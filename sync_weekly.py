@@ -57,6 +57,12 @@ def main() -> None:
 
     core.relink_touched_posts(wp, log_rows, args.execute)
 
+    # 【2026-09-20追記】新規記事の投稿でタグ（post_tag）が増減しうるため、
+    # サイドバー「キーワードから探す」タグ一覧ページも毎回自動で最新化する
+    # （auto_sync_blogs.py本体を--only new-noteで実行した場合と同じ挙動に揃える）。
+    if args.execute:
+        core.regenerate_tag_index_page(wp, creds)
+
     core.append_log(log_rows)
 
     print("\n" + "=" * 60)

@@ -1614,6 +1614,38 @@ def relink_touched_posts(wp: WP, log_rows: list[dict], execute: bool) -> None:
 
 # ==================== メイン ====================
 
+def regenerate_tag_index_page(wp: WP, creds: dict) -> None:
+    """
+    サイドバー「キーワードから探す（50音順）」用のタグ一覧固定ページ（/tags/）を
+    最新のタグ使用状況に合わせて再生成する。note記事の新規投稿・更新追従の
+    どちらでもタグが増減しうるため、それらの経路の最後に必ず呼ぶこと。
+    【2026-09-20追記】auto_sync_blogs.py本体（週次/月次/差分同期すべてが
+    経由するコアモジュール）とsync_weekly.py・sync_updated_notes.pyの
+    双方から共通利用できるよう、main()内にベタ書きされていた処理を
+    関数として切り出した。
+    """
+    print("\n" + "=" * 60)
+    print("サイドバー「キーワードから探す」タグ一覧ページの自動再生成")
+    print("=" * 60)
+    try:
+        import generate_tag_index as tag_index_mod
+        tags = tag_index_mod.fetch_all_tags(wp.site_url, (creds["username"], creds["application_password"]))
+        print(f"使用中のタグ: {len(tags)}件")
+        kks = tag_index_mod.pykakasi.kakasi()
+        page_html = tag_index_mod.build_html(tags, kks)
+        tag_index_mod.OUTPUT_PATH.write_text(page_html, encoding="utf-8")
+        tag_wp = tag_index_mod.WP(creds["site_url"], creds["username"], creds["application_password"])
+        existing = tag_wp.find_page_by_slug(tag_index_mod.PAGE_SLUG)
+        if existing:
+            tag_wp.update_page_content(existing["id"], page_html)
+            print(f"  [OK] タグ一覧ページを更新しました: id={existing['id']} slug={tag_index_mod.PAGE_SLUG}")
+        else:
+            created = tag_wp.create_page(tag_index_mod.PAGE_TITLE, tag_index_mod.PAGE_SLUG, page_html)
+            print(f"  [OK] タグ一覧ページを新規作成しました: id={created['id']} link={created.get('link')}")
+    except Exception as e:
+        print(f"  [警告] タグ一覧ページの自動更新に失敗しました: {e}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="note / エキサイトブログ とWordPressの自動同期")
     parser.add_argument("--execute", action="store_true", help="実際に変更を行う（指定しない場合はドライラン）")
@@ -1684,26 +1716,7 @@ def main() -> None:
     # 気づかれない状態だった。ここで毎回の本番実行の最後に自動で再生成・
     # 固定ページへ反映することで、以後は同期のたびに必ず追従する。
     if args.execute and (args.only in (None, "new-note", "update-note") or args.key):
-        print("\n" + "=" * 60)
-        print("【6】サイドバー「キーワードから探す」タグ一覧ページの自動再生成")
-        print("=" * 60)
-        try:
-            import generate_tag_index as tag_index_mod
-            tags = tag_index_mod.fetch_all_tags(wp.site_url, (creds["username"], creds["application_password"]))
-            print(f"使用中のタグ: {len(tags)}件")
-            kks = tag_index_mod.pykakasi.kakasi()
-            page_html = tag_index_mod.build_html(tags, kks)
-            tag_index_mod.OUTPUT_PATH.write_text(page_html, encoding="utf-8")
-            tag_wp = tag_index_mod.WP(creds["site_url"], creds["username"], creds["application_password"])
-            existing = tag_wp.find_page_by_slug(tag_index_mod.PAGE_SLUG)
-            if existing:
-                tag_wp.update_page_content(existing["id"], page_html)
-                print(f"  [OK] タグ一覧ページを更新しました: id={existing['id']} slug={tag_index_mod.PAGE_SLUG}")
-            else:
-                created = tag_wp.create_page(tag_index_mod.PAGE_TITLE, tag_index_mod.PAGE_SLUG, page_html)
-                print(f"  [OK] タグ一覧ページを新規作成しました: id={created['id']} link={created.get('link')}")
-        except Exception as e:
-            print(f"  [警告] タグ一覧ページの自動更新に失敗しました: {e}")
+        regenerate_tag_index_page(wp, creds)
 
     append_log(all_log_rows)
 
