@@ -81,7 +81,7 @@ from bs4 import BeautifulSoup
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-from link_converter import rebuild_toc
+from link_converter import is_note_toc_nav, rebuild_toc
 from internal_article_links import (
     NOTE_CATEGORY_ID,
     convert_internal_links,
@@ -777,6 +777,13 @@ def fetch_note_body_html(page, url: str) -> str:
         page.wait_for_load_state("networkidle", timeout=10000)
     except Exception:
         pass
+    # 【2026-10-11追記】networkidle待ち後もまれに本文コンテナ未描画のまま判定に進み
+    # 「本文コンテナが見つかりませんでした」で失敗することを実機で確認したため、
+    # いずれかの本文セレクタが現れるまで明示的に待つ。
+    try:
+        page.wait_for_selector(", ".join(NOTE_BODY_SELECTORS), timeout=15000)
+    except Exception:
+        pass
     body_loc = None
     for sel in NOTE_BODY_SELECTORS:
         loc = page.locator(sel).first
@@ -794,7 +801,9 @@ def fetch_note_body_html(page, url: str) -> str:
     html = body_loc.inner_html()
     html = protect_video_timestamp_links(html)
     html = ensure_visible_timestamp_link_before_embed(html)
+    html = normalize_twitter_embeds(html)
     html = rebuild_note_toc(html)
+    html = strip_note_ui_buttons(html)
     return convert_external_article_embeds_to_blogcards(html)
 
 
@@ -809,11 +818,94 @@ def rebuild_note_toc(html: str) -> str:
     h2/h3見出しから素のHTML（<nav class="toc"><ul class="toc-list">...）を
     組み立て直し、常に全項目が展開された状態でジャンプできる目次に置き換える。
     """
-    if "o-tableOfContents" not in html:
+    # 【2026-10-11修正】note側の目次DOMが <div role="presentation"><nav aria-label="目次"
+    # class="mt-9"><details>... に変わりo-tableOfContentsクラスが消えたため、従来の
+    # 文字列判定だけでは目次変換が丸ごとスキップされ、note生の「すべて表示」ボタン付き
+    # HTMLがそのままWordPressへ書き込まれる事故が起きた（直近90日同期で61件）。
+    # 判定はlink_converter.is_note_toc_nav()（クラス名 or aria-label="目次"）に一元化する。
+    if "o-tableOfContents" not in html and 'aria-label="目次"' not in html:
         return html
     soup = BeautifulSoup(html, "html.parser")
+    if soup.find(is_note_toc_nav) is None:
+        return html
     rebuild_toc(soup)
     return str(soup)
+
+
+def strip_note_ui_buttons(html: str) -> str:
+    """
+    【2026-10-11追加】note.comのフロントエンド刷新後、コードブロック（<pre>）の横に
+    「コピー」ボタン（<button data-id="ButtonIcon">＋SVGアイコン）が描画されるようになり、
+    取得した本文にそのまま混入していた。note本文に著者がボタンを置くことはできないため、
+    本文中の<button>はすべてnoteのUI部品とみなして除去し、ボタンを包んでいただけの
+    空のdivも取り除く（WordPress上ではJSが無く押しても何も起きない無意味なボタンになる）。
+    """
+    if "<button" not in html:
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    for button in soup.find_all("button"):
+        wrapper = button.parent
+        button.decompose()
+        while (
+            wrapper is not None and wrapper.name == "div"
+            and not wrapper.get_text(strip=True) and wrapper.find(["img", "iframe", "video", "pre"]) is None
+        ):
+            parent = wrapper.parent
+            wrapper.decompose()
+            wrapper = parent
+    return str(soup)
+
+
+TWITTER_WIDGETS_SCRIPT_SRC = "https://platform.x.com/widgets.js"
+
+
+def normalize_twitter_embeds(html: str) -> str:
+    """
+    【2026-10-11追加】note本文中のX（Twitter）埋め込み（<figure embedded-service="twitter">）を、
+    X公式の標準埋め込みコード（<blockquote class="twitter-tweet">＋widgets.js）へ正規化する。
+
+    従来はnoteページ上でwidgets.jsが描画し終えた後のDOM（<div class="twitter-tweet-rendered">
+    ＋高さ固定のiframe＋読み込むたびに変わるsessionId）をそのまま取り込んでいたため、
+    たまたま描画が済んでいれば表示できていた。しかし2026-10頃のnote.comフロントエンド刷新で、
+    取得時点のDOMが描画前の <blockquote data-class="twitter-tweet">（classではなく
+    data-class属性）になり、widgets.jsがこれを認識できず、WordPress上でただの引用枠として
+    表示される事故が起きた。
+
+    note側がどちらの状態で返しても、常に「class="twitter-tweet"のblockquote＋widgets.js」に
+    組み直す。widgets.jsが閲覧時に画像・動画付きのリッチカードを高さ自動で描画するうえ、
+    出力HTMLが取得タイミングに左右されないため、差分検知のハッシュも安定する。
+    """
+    if 'embedded-service="twitter"' not in html:
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    changed = False
+    for figure in soup.find_all("figure", attrs={"embedded-service": "twitter"}):
+        tweet_url = (figure.get("data-src") or "").strip()
+        src_quote = figure.find("blockquote")
+
+        quote = soup.new_tag("blockquote", attrs={"class": "twitter-tweet", "data-dnt": "true", "data-lang": "ja"})
+        if src_quote is not None and src_quote.get_text(strip=True):
+            # 描画前の状態：本文・投稿者・日付リンクを含む公式マークアップの中身をそのまま活かす
+            for child in list(src_quote.contents):
+                quote.append(child.extract())
+        if not quote.find("a", href=re.compile(r"/status/\d+")):
+            # 描画後（iframeのみ）の状態や中身が空の場合：widgets.jsが投稿を特定できるよう
+            # ステータスURLへのリンクを必ず入れる
+            if not tweet_url:
+                iframe = figure.find("iframe", attrs={"data-tweet-id": True})
+                if iframe is None:
+                    continue  # 投稿URLを特定できない場合は触らない
+                tweet_url = f"https://x.com/i/status/{iframe['data-tweet-id']}"
+            a = soup.new_tag("a", href=tweet_url)
+            a.string = tweet_url
+            quote.append(a)
+
+        script = soup.new_tag("script", attrs={"async": "", "src": TWITTER_WIDGETS_SCRIPT_SRC, "charset": "utf-8"})
+        figure.clear()
+        figure.append(quote)
+        figure.append(script)
+        changed = True
+    return str(soup) if changed else html
 
 
 EXTERNAL_BLOGCARD_AMP_SENTINEL = "AMP"  # 私用領域の文字。本文中の通常テキストと衝突しない
