@@ -128,6 +128,60 @@ def test_code_block_copy_button_removed() -> None:
     print("  [OK] コードブロックのコピーボタン（note UI部品）を除去し、コード本体は維持")
 
 
+EXBLOG_MAP = {
+    "22711505": {"id": 50166, "slug": "exblog-22711505", "link": "https://junchan-world.com/exblog-22711505/",
+                 "title": "エキサイトブログ移行記事", "thumbnail": "https://junchan-world.com/wp-content/uploads/x.jpg"},
+}
+NOTE_MAP = {
+    "n84fb8cb4cfaf": {"id": 1, "slug": "n84fb8cb4cfaf", "link": "https://junchan-world.com/n84fb8cb4cfaf/",
+                      "title": "note移行記事", "thumbnail": ""},
+}
+
+
+def run_link_pipeline(body_html: str) -> str:
+    """本番（sync_note_updates / sync_new_note_posts）と同じ順序でリンク系の変換を通す。"""
+    html = core.convert_external_article_embeds_to_blogcards(body_html)
+    html, _ = core.convert_internal_links(html, NOTE_MAP, EXBLOG_MAP)
+    return core.finalize_external_blogcard_urls(html)
+
+
+def test_own_exblog_external_card_becomes_internal_link() -> None:
+    # 2026-10-11の事故：note記事内に外部カードとして貼られた自分のエキサイトブログ記事が
+    # 外部URL（403で開けないrakusen.exblog.jp）のまま残っていた
+    body = (
+        '<figure embedded-service="external-article" data-src="https://rakusen.exblog.jp/22711505/">'
+        '<a href="https://rakusen.exblog.jp/22711505/"><div class="external-article-widget-title">徳川のルーツ</div>'
+        '<div class="external-article-widget-description">説明文</div></a></figure>'
+        '<figure embedded-service="external-article" data-src="https://note.com/tweettv/n/n84fb8cb4cfaf">'
+        '<a href="https://note.com/tweettv/n/n84fb8cb4cfaf"><div class="external-article-widget-title">別班</div></a></figure>'
+    )
+    out = run_link_pipeline(body)
+    soup = BeautifulSoup(out, "html.parser")
+    links = [a["href"] for a in soup.find_all("a", href=True)]
+    assert links == ["https://junchan-world.com/exblog-22711505/", "https://junchan-world.com/n84fb8cb4cfaf/"], links
+    assert "rakusen.exblog.jp" not in out and "note.com/tweettv" not in out, out
+    assert "[blogcard" not in out, "外部ブログカードのショートコードが残っている"
+    for a in soup.find_all("a", href=True):
+        assert "internal-article-card" in (a.get("class") or []), "カード全体が<a>で囲まれた内部カードになっていない"
+        assert a.get_text(strip=True), "カードにタイトルが無い"
+    print("  [OK] 自サイトのexblog/note記事への外部カード → hrefを持つ内部カード<a>に変換")
+
+
+def test_other_external_cards_keep_url() -> None:
+    body = (
+        '<figure embedded-service="external-article" data-src="https://ja.wikipedia.org/wiki/X">'
+        '<a href="https://ja.wikipedia.org/wiki/X"><div class="external-article-widget-title">X - Wikipedia</div></a></figure>'
+        '<figure embedded-service="external-article" data-src="https://rakusen.exblog.jp/99999999/">'
+        '<a href="https://rakusen.exblog.jp/99999999/"><div class="external-article-widget-title">未移行</div></a></figure>'
+        '<p>[blogcard url="https://junchan-world.com/exblog-28299681/?title=A"]</p>'
+    )
+    out = run_link_pipeline(body)
+    assert '[blogcard url="https://ja.wikipedia.org/wiki/X?title=X+-+Wikipedia"]' in out, out
+    assert '[blogcard url="https://rakusen.exblog.jp/99999999/?title=' in out, "対応記事の無いexblogカードは元のURLを維持すべき"
+    assert '[blogcard url="https://junchan-world.com/exblog-28299681/?title=A"]' in out, "既に内部URLのカードは触らない"
+    print("  [OK] 他サイト・未移行exblog・既に内部URLのカードは元のURLのまま維持")
+
+
 def test_live_fetch() -> None:
     from playwright.sync_api import sync_playwright
 
@@ -156,6 +210,8 @@ def main() -> None:
         test_legacy_toc_still_supported,
         test_already_converted_toc_untouched,
         test_code_block_copy_button_removed,
+        test_own_exblog_external_card_becomes_internal_link,
+        test_other_external_cards_keep_url,
     ]
     if "--live" in sys.argv:
         tests.append(test_live_fetch)
