@@ -131,11 +131,29 @@ def test_code_block_copy_button_removed() -> None:
 EXBLOG_MAP = {
     "22711505": {"id": 50166, "slug": "exblog-22711505", "link": "https://junchan-world.com/exblog-22711505/",
                  "title": "エキサイトブログ移行記事", "thumbnail": "https://junchan-world.com/wp-content/uploads/x.jpg"},
+    # エキサイトブログ移行記事の約3割はアイキャッチ未設定（2026-10-11時点で103/339件）
+    "29491891": {"id": 50250, "slug": "exblog-29491891", "link": "https://junchan-world.com/exblog-29491891/",
+                 "title": "アイキャッチ無しの移行記事", "thumbnail": ""},
 }
 NOTE_MAP = {
     "n84fb8cb4cfaf": {"id": 1, "slug": "n84fb8cb4cfaf", "link": "https://junchan-world.com/n84fb8cb4cfaf/",
-                      "title": "note移行記事", "thumbnail": ""},
+                      "title": "note移行記事", "thumbnail": "https://junchan-world.com/wp-content/uploads/n.jpg"},
 }
+NOTE_OGP = "https://assets.st-note.com/production/uploads/ext/abc.png?x-type=ogp"
+
+
+def note_external_widget(url: str, title: str, desc: str = "", image: str = NOTE_OGP, domain: str = "") -> str:
+    """note.comが描画する外部リンク埋め込みの実際の構造（2026-10-11時点の実機DOM）。"""
+    img = (f'<a class="external-article-widget-image" href="{url}" rel="noopener nofollow" '
+           f"style='background-image: url(\"{image}\");' target=\"_blank\"></a>") if image else ""
+    return (
+        f'<figure data-src="{url}" embedded-service="external-article" id="fig-{abs(hash(url)) % 10**6}">'
+        f'<div data-name="embedContainer"><div data-embed-service="external-article"><span><div class="external-article-widget">'
+        f'<a href="{url}" rel="noopener nofollow" target="_blank"><strong class="external-article-widget-title">{title}</strong>'
+        f'<em class="external-article-widget-description">{desc}</em>'
+        f'<em class="external-article-widget-url">{domain or url.split("/")[2]}</em></a>{img}'
+        f'</div></span></div></div></figure>'
+    )
 
 
 def run_link_pipeline(body_html: str) -> str:
@@ -145,41 +163,99 @@ def run_link_pipeline(body_html: str) -> str:
     return core.finalize_external_blogcard_urls(html)
 
 
-def test_own_exblog_external_card_becomes_internal_link() -> None:
-    # 2026-10-11の事故：note記事内に外部カードとして貼られた自分のエキサイトブログ記事が
-    # 外部URL（403で開けないrakusen.exblog.jp）のまま残っていた
+def assert_all_cards_rich(html: str) -> list:
+    """すべてのブログカードが「href付き<a>1本で全体を囲み、サムネイル画像・タイトル付き」であること。"""
+    assert "[blogcard" not in html, "Cocoonの[blogcard]ショートコード（表示時ライブ取得）が残っている"
+    assert "external-article-widget" not in html, "note生の外部リンクウィジェットが残っている"
+    soup = BeautifulSoup(html, "html.parser")
+    cards = soup.select("a.jw-blogcard")
+    for a in cards:
+        href = a.get("href") or ""
+        assert href.startswith("http"), f"カードのhrefが不正: {href!r}"
+        assert a.find("a") is None, "カードの<a>の中に別の<a>がネストしている（クリック先が壊れる）"
+        img = a.find("img")
+        assert img is not None and (img.get("src") or "").startswith("http"), f"サムネイル画像が無い: {href}"
+        title = a.find(class_="jw-blogcard-title")
+        assert title is not None and title.get_text(strip=True), f"タイトルが無い: {href}"
+        assert a.find(class_="jw-blogcard-domain") is not None
+        if "external-article-card" in a["class"]:
+            assert a.get("target") == "_blank" and "noopener" in (a.get("rel") or []), "外部カードが新規タブで開かない"
+        else:
+            assert href.startswith("https://junchan-world.com/"), f"内部カードのリンク先が自サイトでない: {href}"
+    return cards
+
+
+def test_blogcards_external_and_internal() -> None:
     body = (
-        '<figure embedded-service="external-article" data-src="https://rakusen.exblog.jp/22711505/">'
-        '<a href="https://rakusen.exblog.jp/22711505/"><div class="external-article-widget-title">徳川のルーツ</div>'
-        '<div class="external-article-widget-description">説明文</div></a></figure>'
-        '<figure embedded-service="external-article" data-src="https://note.com/tweettv/n/n84fb8cb4cfaf">'
-        '<a href="https://note.com/tweettv/n/n84fb8cb4cfaf"><div class="external-article-widget-title">別班</div></a></figure>'
+        note_external_widget("https://www.yomiuri.co.jp/national/20261010-OYT1T50000/", "読売新聞の記事", "説明文です")
+        + note_external_widget("https://www.parstoday.ir/ja/news/1", "海外サイト（OGP画像なし）", image="")
+        + note_external_widget("https://rakusen.exblog.jp/22711505/", "徳川のルーツ", "旧ブログ")
+        + note_external_widget("https://rakusen.exblog.jp/29491891/", "日航機墜落")
+        + note_external_widget("https://note.com/tweettv/n/n84fb8cb4cfaf", "別班")
+        + note_external_widget("https://rakusen.exblog.jp/99999999/", "未移行の旧ブログ記事")
     )
     out = run_link_pipeline(body)
-    soup = BeautifulSoup(out, "html.parser")
-    links = [a["href"] for a in soup.find_all("a", href=True)]
-    assert links == ["https://junchan-world.com/exblog-22711505/", "https://junchan-world.com/n84fb8cb4cfaf/"], links
-    assert "rakusen.exblog.jp" not in out and "note.com/tweettv" not in out, out
-    assert "[blogcard" not in out, "外部ブログカードのショートコードが残っている"
-    for a in soup.find_all("a", href=True):
-        assert "internal-article-card" in (a.get("class") or []), "カード全体が<a>で囲まれた内部カードになっていない"
-        assert a.get_text(strip=True), "カードにタイトルが無い"
-    print("  [OK] 自サイトのexblog/note記事への外部カード → hrefを持つ内部カード<a>に変換")
+    cards = assert_all_cards_rich(out)
+    got = [(a["href"], a.find("img")["src"], "internal" if "internal-article-card" in a["class"] else "external") for a in cards]
+    expected = [
+        ("https://www.yomiuri.co.jp/national/20261010-OYT1T50000/", NOTE_OGP, "external"),
+        ("https://www.parstoday.ir/ja/news/1", None, "external"),  # OGP画像なし→mshots
+        ("https://junchan-world.com/exblog-22711505/", "https://junchan-world.com/wp-content/uploads/x.jpg", "internal"),
+        ("https://junchan-world.com/exblog-29491891/", NOTE_OGP, "internal"),  # アイキャッチ無し→note側OGP画像
+        ("https://junchan-world.com/n84fb8cb4cfaf/", "https://junchan-world.com/wp-content/uploads/n.jpg", "internal"),
+        ("https://rakusen.exblog.jp/99999999/", NOTE_OGP, "external"),  # 未移行は外部のまま
+    ]
+    assert len(got) == len(expected), got
+    for (h, img, kind), (eh, eimg, ekind) in zip(got, expected):
+        assert h == eh and kind == ekind, (h, kind, eh, ekind)
+        if eimg is None:
+            assert img.startswith("https://s.wordpress.com/mshots/v1/"), img
+        else:
+            assert img == eimg, (h, img, eimg)
+    assert "説明文です" in out, "説明文が失われた"
+    print(f"  [OK] 外部{sum(k == 'external' for *_, k in got)}枚・内部{sum(k == 'internal' for *_, k in got)}枚すべて"
+          "「href付き<a>＋サムネイル＋タイトル」（読売・海外・自サイト・未移行）")
 
 
-def test_other_external_cards_keep_url() -> None:
+def test_legacy_shortcodes_converted() -> None:
+    S = "AMP"
     body = (
-        '<figure embedded-service="external-article" data-src="https://ja.wikipedia.org/wiki/X">'
-        '<a href="https://ja.wikipedia.org/wiki/X"><div class="external-article-widget-title">X - Wikipedia</div></a></figure>'
-        '<figure embedded-service="external-article" data-src="https://rakusen.exblog.jp/99999999/">'
-        '<a href="https://rakusen.exblog.jp/99999999/"><div class="external-article-widget-title">未移行</div></a></figure>'
         '<p>[blogcard url="https://junchan-world.com/exblog-28299681/?title=A"]</p>'
+        f'<p>[blogcard url="https://www.yomiuri.co.jp/a/?id=1{S}title=%E8%AA%AD%E5%A3%B2{S}snippet=%E8%AA%AC%E6%98%8E"]</p>'
+        '<p>[blogcard url="https://ja.wikipedia.org/wiki/X?title=X+-+Wikipedia&amp;snippet=S"]</p>'
+        '<p>[blogcard url="https://rakusen.exblog.jp/29491891/?title=T"]</p>'
     )
-    out = run_link_pipeline(body)
-    assert '[blogcard url="https://ja.wikipedia.org/wiki/X?title=X+-+Wikipedia"]' in out, out
-    assert '[blogcard url="https://rakusen.exblog.jp/99999999/?title=' in out, "対応記事の無いexblogカードは元のURLを維持すべき"
-    assert '[blogcard url="https://junchan-world.com/exblog-28299681/?title=A"]' in out, "既に内部URLのカードは触らない"
-    print("  [OK] 他サイト・未移行exblog・既に内部URLのカードは元のURLのまま維持")
+    out, n = core.convert_internal_links(body, NOTE_MAP, EXBLOG_MAP)
+    out = core.finalize_external_blogcard_urls(out)
+    cards = assert_all_cards_rich(out)
+    hrefs = [a["href"] for a in cards]
+    assert hrefs == [
+        "https://junchan-world.com/exblog-28299681/",
+        "https://www.yomiuri.co.jp/a/?id=1",
+        "https://ja.wikipedia.org/wiki/X",
+        "https://junchan-world.com/exblog-29491891/",
+    ], hrefs
+    assert cards[1].find(class_="jw-blogcard-title").get_text() == "読売"
+    assert cards[3].find("img")["src"] == core_ial().INTERNAL_NO_IMAGE_URL, "アイキャッチもnote画像も無い場合は既定画像"
+    print("  [OK] 保存済みの旧[blogcard]ショートコードも、全件hrefとサムネイル付きの静的カードへ変換")
+
+
+def test_legacy_internal_card_upgraded_and_http_thumb() -> None:
+    legacy = ('<p><a class="internal-article-card" href="https://junchan-world.com/exblog-29491891/" id="x1" style="display:block;">'
+              '<span style="display:block;padding:0.8em 1em;"><span>古いカード</span></span></a></p>')
+    out, n = core.convert_internal_links(legacy, NOTE_MAP, EXBLOG_MAP)
+    cards = assert_all_cards_rich(out)
+    assert n == 1 and len(cards) == 1 and cards[0].get("id") == "x1", out
+    ext = core_ial().build_blogcard_html("https://plaza.rakuten.co.jp/x/", "楽天", thumbnail="http://plaza.jp.rakuten-static.com/a.png")
+    assert 'src="https://plaza.jp.rakuten-static.com/a.png"' in ext, ext
+    again, n2 = core.convert_internal_links(out, NOTE_MAP, EXBLOG_MAP)
+    assert n2 == 0, "現行形式のカードを再変換してしまう（冪等でない）"
+    print("  [OK] 旧形式の内部カード→現行形式（サムネイル付き）へ自動更新 / http画像はhttps化 / 冪等")
+
+
+def core_ial():
+    import internal_article_links
+    return internal_article_links
 
 
 def test_live_fetch() -> None:
@@ -210,8 +286,9 @@ def main() -> None:
         test_legacy_toc_still_supported,
         test_already_converted_toc_untouched,
         test_code_block_copy_button_removed,
-        test_own_exblog_external_card_becomes_internal_link,
-        test_other_external_cards_keep_url,
+        test_blogcards_external_and_internal,
+        test_legacy_shortcodes_converted,
+        test_legacy_internal_card_upgraded_and_http_thumb,
     ]
     if "--live" in sys.argv:
         tests.append(test_live_fetch)

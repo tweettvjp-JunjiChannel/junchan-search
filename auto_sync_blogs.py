@@ -84,6 +84,8 @@ if hasattr(sys.stdout, "reconfigure"):
 from link_converter import is_note_toc_nav, rebuild_toc
 from internal_article_links import (
     NOTE_CATEGORY_ID,
+    SITE_DOMAIN,
+    build_blogcard_html,
     convert_internal_links,
     fetch_link_maps,
     find_error_text_markers,
@@ -913,52 +915,35 @@ EXTERNAL_BLOGCARD_TITLE_MAX_LENGTH = 200
 EXTERNAL_BLOGCARD_SNIPPET_MAX_LENGTH = 300
 
 
+NOTE_WIDGET_BG_URL_RE = re.compile(r"""url\(\s*["']?([^"')]+)["']?\s*\)""")
+
+
 def convert_external_article_embeds_to_blogcards(html: str) -> str:
     """noteの「外部サイトへのリンク埋め込み」（note編集画面でURLをそのまま貼ると
     生成される <figure embedded-service="external-article">...</figure> ウィジェット）
-    を、Cocoonテーマのブログカードショートコード [blogcard url="..."] に置き換える。
+    を、サムネイル・タイトル・説明文・ドメイン付きの静的なブログカード
+    （internal_article_links.build_blogcard_html。カード全体がhref付きの<a>1本）に
+    置き換える。
 
-    note.com側はこのウィジェットを自前のCSS（.external-article-widget/
-    .external-article-widget-image 等）でサムネイル付きカードとして描画しているが、
-    そのCSSはnote.com上にしか存在しないため、HTML構造をそのままWordPressへ
-    持ち込んでも当サイト（Cocoon）上ではスタイルが一切当たらず、青文字の
-    テキストリンクが並ぶだけの見た目になってしまう（2026-09-13、実機で確認）。
+    note.com側はこのウィジェットを自前のCSSでカード描画しているが、そのCSSは
+    note.com上にしか無いため、そのまま持ち込むと青文字のリンクが並ぶだけになる
+    （2026-09-13確認）。
 
-    【2026-09-13追記：相手先サーバーのOGP取得ブロック対策】
-    Cocoonの外部ブログカード（lib/blogcard-out.php の url_to_external_ogp_blogcard_tag）
-    は、対象URL先へライブでOGP（title/description/image）を取得しに行く方式のため、
-    parstoday.ir等、スクレイピングをブロックするサーバーではタイトル取得に失敗し
-    URLがそのまま表示されてしまう（実機で確認）。wp-adminのテーマファイル
-    エディター経由でCocoon本体のソースを直接確認したところ、
-    url_to_external_ogp_blogcard_tag() は `get_url_params($url)` で**URL自身の
-    クエリ文字列から`title`/`snippet`パラメータを読み取り、値があれば
-    OGP取得結果より優先して使う**仕様であることが判明した
-    （shortcode_atts自体はurlしか受け付けない＝[blogcard title="..."]という
-    別引数の形では効かないため注意。あくまで url= に渡す値自体へ
-    ?title=...&snippet=... を埋め込む必要がある）。noteの埋め込みウィジェットは
-    タイトル（.external-article-widget-title）・説明文
-    （.external-article-widget-description）を既に保持しているため、これらを
-    そのままCocoonへの事前ヒントとして渡すことで、相手先サーバーの可用性に
-    左右されず常に正しいタイトル・説明文を表示できる（サムネイル画像は
-    Cocoon側にurlパラメータでの上書き機構が無いため、ライブ取得のフォールバック
-    に委ねる＝取得できなければ「no-image」表示のまま。507対策としては
-    エラー文字列が露出しないことが重要であり、Cocoon側は取得失敗時に
-    URLをそのまま出す非破壊フォールバックのため、CLAUDE.md 7項の方針にも反しない）。
-
-    urlencode()で通常のURLエンコードを行うため、title/snippetに含まれる
-    `&`や`"`等の特殊文字も安全に一つのクエリ文字列へ格納できる。ただし
-    urlencode後の文字列にも区切り文字としての生の`&`が含まれるため、そのまま
-    BeautifulSoupの文字列ノードとして挿入すると`&`が`&amp;`にHTMLエスケープ
-    され、Cocoon側のクエリパース時に`&amp;snippet=...`という壊れたキー名に
-    なってしまう。他の本文中の正当な`&amp;`（例:"AT&T"等）まで巻き込んで
-    無差別に戻すと事故るため、生成した`&`だけを私用領域文字のセンチネルに
-    退避させ、BeautifulSoupでのシリアライズ完了後にセンチネルだけを`&`へ
-    戻す（対象を限定した安全な置換）。
+    【2026-10-11 抜本改修：Cocoonの[blogcard]ショートコード出力を廃止】
+    従来は [blogcard url="URL?title=...&snippet=..."] を出力し、描画をCocoonに委ねて
+    いた。しかしCocoonの外部ブログカードは表示のたびに相手先へOGPをライブ取得する
+    方式のため、(1) 外部リンクの多い記事では後半のカードが空になりクリックできない
+    （CLAUDE.md 18項「既知の限界」）、(2) 相手先がボット拒否（403等）するとサムネイルが
+    取れない、(3) URLに?title=...を埋め込むためリンク先URL自体が書き換わる、という
+    構造的な問題を抱えていた。note側のウィジェットはタイトル・説明文・ドメインに加え、
+    OGP画像をnote自身のCDN（assets.st-note.com）にキャッシュした
+    <a class="external-article-widget-image" style="background-image:url(...)">も
+    持っているため、これらを同期時にすべて確定させて静的HTML化する。リンク先が
+    自分のnote/エキサイトブログ記事の場合は、後段の
+    internal_article_links.convert_internal_links が内部カードへ組み直す。
 
     note.com自身の過去記事への埋め込み（embedded-service="note"）は対象外
-    （internal_article_links.py が別途、自サイト内部リンク専用のカードに変換する。
-    そちらは埋め込みのiframeがnote.comへ遷移してしまう問題への対応であり、
-    本関数とは対象・目的が異なる）。
+    （internal_article_links.py が別途、自サイト内部リンク専用のカードに変換する）。
     """
     if 'embedded-service="external-article"' not in html:
         return html
@@ -974,34 +959,36 @@ def convert_external_article_embeds_to_blogcards(html: str) -> str:
 
         title_el = figure.find(class_="external-article-widget-title")
         desc_el = figure.find(class_="external-article-widget-description")
+        domain_el = figure.find(class_="external-article-widget-url")
+        image_el = figure.find(class_="external-article-widget-image")
         title = (title_el.get_text(strip=True) if title_el else "")[:EXTERNAL_BLOGCARD_TITLE_MAX_LENGTH]
         snippet = (desc_el.get_text(strip=True) if desc_el else "")[:EXTERNAL_BLOGCARD_SNIPPET_MAX_LENGTH]
+        domain = domain_el.get_text(strip=True) if domain_el else ""
+        thumbnail = ""
+        if image_el is not None:
+            m = NOTE_WIDGET_BG_URL_RE.search(image_el.get("style") or "")
+            if m:
+                thumbnail = m.group(1).strip()
+            elif image_el.find("img") is not None:
+                thumbnail = image_el.find("img").get("src") or ""
 
-        card_url = url
-        extra_params = [(k, v) for k, v in (("title", title), ("snippet", snippet)) if v]
-        if extra_params:
-            parts = urlsplit(url)
-            query_pairs = parse_qsl(parts.query, keep_blank_values=True) + extra_params
-            new_query = urlencode(query_pairs).replace("&", EXTERNAL_BLOGCARD_AMP_SENTINEL)
-            card_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
-
-        shortcode_p = soup.new_tag("p")
-        shortcode_p.string = f'[blogcard url="{card_url}"]'
-        figure.replace_with(shortcode_p)
+        is_internal = urlsplit(url).netloc.lower() == SITE_DOMAIN
+        card_html = build_blogcard_html(
+            url, title or url, snippet=snippet, thumbnail=thumbnail, domain=domain,
+            internal=is_internal, element_id=figure.get("id"),
+        )
+        figure.replace_with(BeautifulSoup(card_html, "html.parser").find("a"))
         changed = True
-    if not changed:
-        return html
-    # 【重要】ここではセンチネルを"&"へ戻さない。この関数の戻り値は、後段の
-    # convert_internal_links() で再度BeautifulSoupにより解析・シリアライズ
-    # されるため、ここで"&"に戻すと今度はそちらの再シリアライズ時に
-    # 改めて"&amp;"へエスケープされ直してしまう（実機で確認済みの事故）。
-    # センチネルのままパイプライン全体を通過させ、WordPressへ送信する直前
-    # （finalize_external_blogcard_urls）で最後に一度だけ戻す。
-    return str(soup)
+    return str(soup) if changed else html
+
 
 
 def finalize_external_blogcard_urls(content: str) -> str:
-    """convert_external_article_embeds_to_blogcards が退避させたセンチネルを
+    """【2026-10-11以降】convert_external_article_embeds_to_blogcards は静的カードを出力し
+    センチネルを生成しなくなったが、過去にショートコード方式で保存済みの本文を扱う
+    バックフィル系スクリプトとの互換のため残している。以下は旧方式の説明。
+
+    convert_external_article_embeds_to_blogcards が退避させたセンチネルを
     実際の"&"へ戻す。本文の加工が完全に終わり、WordPressへ送信する直前
     （wp.create_post / wp.update_post の直前）で必ず最後に1回だけ呼ぶこと。
     途中に convert_internal_links 等、追加でBeautifulSoupのシリアライズを

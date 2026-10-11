@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import html
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -263,43 +263,159 @@ _CARD_LINK_STYLE = (
     "border-radius:10px;overflow:hidden;margin:1em 0;background:#fff;"
     "max-width:494px;box-shadow:0 1px 3px rgba(0,0,0,0.08);"
 )
-_CARD_THUMB_STYLE = (
-    "display:block;width:100%;height:200px;background-color:#f0f0f0;"
-    "background-image:url('{thumb}');background-size:cover;background-position:center;"
-)
+_CARD_THUMB_WRAP_STYLE = "display:block;width:100%;height:200px;overflow:hidden;background-color:#f0f0f0;"
+_CARD_THUMB_IMG_STYLE = "display:block;width:100%;height:100%;object-fit:cover;margin:0;border:0;"
 _CARD_BODY_STYLE = "display:block;padding:0.8em 1em;"
 _CARD_TITLE_STYLE = (
     "display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;"
     "overflow:hidden;font-weight:bold;font-size:0.95em;line-height:1.5;color:#222;"
 )
+_CARD_SNIPPET_STYLE = (
+    "display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;"
+    "overflow:hidden;margin-top:0.4em;font-size:0.8em;line-height:1.5;color:#666;"
+)
 _CARD_DOMAIN_STYLE = "display:block;margin-top:0.6em;font-size:0.75em;color:#999;"
 
+SITE_DOMAIN = "junchan-world.com"
+# サムネイルの最終フォールバック。どのカードも必ず画像付きで出力するための保険。
+# 自サイト記事：Cocoonテーマ同梱の「画像なし」画像（自サイト配信のため常に200を返す）。
+# 外部サイト：Cocoon本体の外部ブログカードと同じ WordPress.com mshots（ページの
+# スクリーンショット画像を返す公開サービス）。
+INTERNAL_NO_IMAGE_URL = "https://junchan-world.com/wp-content/themes/cocoon-master/images/no-image-320.png"
+MSHOTS_URL_TEMPLATE = "https://s.wordpress.com/mshots/v1/{url}?w=640&h=360"
 
-def build_article_card_html(target: dict) -> str:
-    """アイキャッチ画像＋タイトル＋サイトドメイン表記を持つ、自サイト用の
-    リッチなブログカードHTML（インラインstyleのみ・<a>1本で完結）を組み立てる。"""
-    title = html.escape(target.get("title") or target["link"])
-    thumb_html = ""
-    if target.get("thumbnail"):
-        thumb_style = _CARD_THUMB_STYLE.format(thumb=target["thumbnail"])
-        thumb_html = f'<span style="{thumb_style}"></span>'
+
+def build_blogcard_html(
+    url: str,
+    title: str,
+    snippet: str = "",
+    thumbnail: str = "",
+    domain: str = "",
+    internal: bool = False,
+    element_id: str | None = None,
+) -> str:
+    """
+    【2026-10-11 抜本改修】本文中のすべてのブログカード（自サイト記事・外部サイトの別を
+    問わない）を出力する唯一の関数。
+
+    従来は (a) 自サイト記事＝この関数の前身（アイキャッチが無いとサムネイル自体を出さない）、
+    (b) 外部サイト＝Cocoonの[blogcard]ショートコード（表示のたびにリンク先のOGPを
+    ライブ取得して描画。外部リンクの多い記事では後半のカードが空になり、クリック
+    できなくなる既知の不具合あり。CLAUDE.md 18項「既知の限界」）の2系統が混在しており、
+    サムネイルの欠落と、クリックできない外部カードの両方の原因になっていた。
+
+    同期時（ビルド時）にすべての情報を確定させた静的HTMLとして出力し、表示時の
+    ライブ取得に一切依存しない（CLAUDE.md 7項③の方針）。必ず次をすべて満たす:
+      - カード全体を、href付きの<a>タグ1本で囲む
+      - サムネイル画像（<img>）を必ず含む（取得できなければフォールバック画像）
+      - タイトル・（あれば）説明文・ドメインを含む
+    wpautopに崩されないよう、ブロック要素（div等）は使わずspan（display:block）で組む。
+    """
+    if thumbnail.startswith("http://"):
+        # httpsのサイト上でhttp画像は混在コンテンツとしてブラウザに遮断されうる
+        # （実例: plaza.jp.rakuten-static.com はhttpだと接続タイムアウト、httpsなら200）
+        thumbnail = "https://" + thumbnail[len("http://"):]
+    if not thumbnail:
+        thumbnail = INTERNAL_NO_IMAGE_URL if internal else MSHOTS_URL_TEMPLATE.format(url=quote(url, safe=""))
+    if not domain:
+        domain = SITE_DOMAIN if internal else urlparse(url).netloc
+    attrs = [
+        f'class="jw-blogcard {"internal-article-card" if internal else "external-article-card"}"',
+        f'href="{html.escape(url, quote=True)}"',
+    ]
+    if not internal:
+        attrs.append('target="_blank" rel="noopener noreferrer"')
+    if element_id:
+        attrs.append(f'id="{html.escape(element_id, quote=True)}"')
+    attrs.append(f'style="{_CARD_LINK_STYLE}"')
+    snippet_html = f'<span class="jw-blogcard-snippet" style="{_CARD_SNIPPET_STYLE}">{html.escape(snippet)}</span>' if snippet else ""
     return (
-        f'<a class="internal-article-card" href="{target["link"]}" style="{_CARD_LINK_STYLE}">'
-        f"{thumb_html}"
+        f"<a {' '.join(attrs)}>"
+        f'<span class="jw-blogcard-thumb" style="{_CARD_THUMB_WRAP_STYLE}">'
+        f'<img src="{html.escape(thumbnail, quote=True)}" alt="" loading="lazy" style="{_CARD_THUMB_IMG_STYLE}"/>'
+        f"</span>"
         f'<span style="{_CARD_BODY_STYLE}">'
-        f'<span style="{_CARD_TITLE_STYLE}">{title}</span>'
-        f'<span style="{_CARD_DOMAIN_STYLE}">junchan-world.com</span>'
+        f'<span class="jw-blogcard-title" style="{_CARD_TITLE_STYLE}">{html.escape(title or url)}</span>'
+        f"{snippet_html}"
+        f'<span class="jw-blogcard-domain" style="{_CARD_DOMAIN_STYLE}">{html.escape(domain)}</span>'
         f"</span>"
         f"</a>"
     )
 
 
-def _card_tag_for(soup: BeautifulSoup, target: dict, source_id: str | None) -> "BeautifulSoup":
-    card_soup = BeautifulSoup(build_article_card_html(target), "html.parser")
-    card_tag = card_soup.find("a")
-    if source_id:
-        card_tag["id"] = source_id
-    return card_tag
+def build_article_card_html(target: dict, fallback_thumbnail: str = "", snippet: str = "",
+                            element_id: str | None = None) -> str:
+    """自サイト記事（fetch_link_mapsの対応表の1件）用のカード。サムネイルは
+    アイキャッチ画像 → fallback_thumbnail（note側カードが持っていたOGP画像等）
+    → 「画像なし」画像 の順で必ず埋める（エキサイトブログ移行記事の約3割は
+    アイキャッチ未設定のため、アイキャッチだけに頼るとサムネイルが消える）。"""
+    return build_blogcard_html(
+        target["link"],
+        target.get("title") or target["link"],
+        snippet=snippet,
+        thumbnail=target.get("thumbnail") or fallback_thumbnail,
+        domain=SITE_DOMAIN,
+        internal=True,
+        element_id=element_id,
+    )
+
+
+def _card_tag_for(soup: BeautifulSoup, target: dict, source_id: str | None,
+                  fallback_thumbnail: str = "", snippet: str = "") -> "BeautifulSoup":
+    card_html = build_article_card_html(target, fallback_thumbnail=fallback_thumbnail, snippet=snippet,
+                                        element_id=source_id)
+    return BeautifulSoup(card_html, "html.parser").find("a")
+
+
+_LEGACY_CARD_BG_RE = re.compile(r"background-image:url\('([^']+)'\)")
+
+
+def _upgrade_legacy_internal_cards(soup: BeautifulSoup, note_map: dict[str, dict], exblog_map: dict[str, dict]) -> int:
+    """【2026-10-11追加】旧 build_article_card_html が出力した、jw-blogcardクラスを持たない
+    旧形式の内部カード（アイキャッチ未設定の記事ではサムネイル自体が無い）を、現行の
+    build_article_card_html で組み直す。noteから取り直した本文が変わらず差分同期で
+    「変更なし」になる記事にも、この変換を通すだけで現行形式が行き渡るようにする。"""
+    count = 0
+    for a in soup.select("a.internal-article-card[href]"):
+        if "jw-blogcard" in (a.get("class") or []):
+            continue
+        target = _resolve_blogcard_target(a["href"], note_map, exblog_map)
+        if not target:
+            continue
+        m = _LEGACY_CARD_BG_RE.search(str(a))
+        a.replace_with(_card_tag_for(soup, target, a.get("id"), fallback_thumbnail=m.group(1) if m else ""))
+        count += 1
+    return count
+
+
+def _upgrade_external_cards(soup: BeautifulSoup, note_map: dict[str, dict], exblog_map: dict[str, dict]) -> int:
+    """
+    【2026-10-11追加】auto_sync_blogs.convert_external_article_embeds_to_blogcards が
+    note側の外部リンク埋め込みから組み立てた外部カード（a.external-article-card）の
+    うち、リンク先が自分のnote/エキサイトブログ記事でサイト内に対応記事があるものを、
+    内部リンクのカードへ組み直す（同じ記事内でも外部扱いのままだと、403で開けない
+    rakusen.exblog.jp等へ飛ばされるため）。サムネイルはサイト内記事のアイキャッチを
+    優先し、無ければnote側カードが持っていたOGP画像を引き継ぐ（mshotsのスクリーン
+    ショットは外部扱い時のフォールバックなので引き継がない）。
+    """
+    count = 0
+    for a in soup.select("a.external-article-card[href]"):
+        match = _match_target(a["href"])
+        if not match:
+            continue
+        kind, key = match
+        target = (note_map if kind == "note" else exblog_map).get(key)
+        if not target:
+            continue
+        img = a.find("img")
+        thumb = (img.get("src") or "") if img else ""
+        if "s.wordpress.com/mshots/" in thumb:
+            thumb = ""
+        snippet_el = a.find(class_="jw-blogcard-snippet")
+        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+        a.replace_with(_card_tag_for(soup, target, a.get("id"), fallback_thumbnail=thumb, snippet=snippet))
+        count += 1
+    return count
 
 
 def _replace_note_embed_cards(soup: BeautifulSoup, note_map: dict[str, dict]) -> int:
@@ -388,6 +504,22 @@ BLOGCARD_SHORTCODE_PLAIN_PATTERN = re.compile(
 )
 
 
+LEGACY_BLOGCARD_AMP_SENTINEL = "AMP"  # auto_sync_blogs.EXTERNAL_BLOGCARD_AMP_SENTINEL と同じ値（私用領域文字をエスケープ表記）
+
+
+def _split_legacy_blogcard_url(raw_url: str) -> tuple[str, str, str]:
+    """旧方式の [blogcard url="URL?title=...&snippet=..."] から、本来のリンク先URLと
+    タイトル・説明文を取り出す（title/snippetはCocoonへの表示ヒントとして後付けした
+    クエリなので、リンク先URLからは取り除く）。"""
+    url = html.unescape(raw_url).replace(LEGACY_BLOGCARD_AMP_SENTINEL, "&")
+    parts = urlsplit(url)
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    hints = {k: v for k, v in pairs if k in ("title", "snippet")}
+    rest = [(k, v) for k, v in pairs if k not in ("title", "snippet")]
+    clean = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(rest), parts.fragment))
+    return clean, hints.get("title", ""), hints.get("snippet", "")
+
+
 def _resolve_blogcard_target(url: str, note_map: dict[str, dict], exblog_map: dict[str, dict]) -> dict | None:
     match = _match_target(url)
     if match:
@@ -399,7 +531,14 @@ def _resolve_blogcard_target(url: str, note_map: dict[str, dict], exblog_map: di
     if "junchan-world.com" not in parsed.netloc:
         return None
     slug = parsed.path.strip("/")
-    return note_map.get(slug) or exblog_map.get(slug)
+    # 対応表のキーはnoteが記事key（=スラッグと同じ "n..."）、exblogが記事ID（スラッグは
+    # "exblog-{ID}"）。スラッグのまま引くとexblog記事を取りこぼすため、classify_slugで
+    # キーへ変換してから引く（2026-10-11修正）。
+    classified = classify_slug(slug)
+    if not classified:
+        return None
+    kind, key = classified
+    return (note_map if kind == "note" else exblog_map).get(key)
 
 
 def replace_blogcard_shortcodes(
@@ -445,19 +584,18 @@ def replace_blogcard_shortcodes(
         return build_article_card_html(target)
 
     def _sub_plain(m: re.Match) -> str:
+        # 【2026-10-11 抜本改修】旧パイプライン（Cocoonショートコード出力方式）で保存済みの
+        # 素の [blogcard] を、自サイト・外部サイトの別なく静的カードへ置き換える。
+        # 表示時のライブOGP取得に依存しなくなり、後半のカードが空になって
+        # クリックできない不具合（CLAUDE.md 18項「既知の限界」）が根本から無くなる。
         nonlocal count
-        url = html.unescape(m.group(1))
-        # 外部（note.com / rakusen.exblog.jp）を指すカードだけを対象にする。既に自サイトURLの
-        # カードはCocoonの内部ブログカードとして正常に遷移できているため触らない。
-        match = _match_target(url)
-        if not match:
-            return m.group(0)
-        kind, key = match
-        target = (note_map if kind == "note" else exblog_map).get(key)
-        if not target:
-            return m.group(0)  # サイト内に対応記事が無ければ元の外部カードを維持
+        card_url, title, snippet = _split_legacy_blogcard_url(m.group(1))
+        target = _resolve_blogcard_target(card_url, note_map, exblog_map)
         count += 1
-        return build_article_card_html(target)
+        if target:
+            return build_article_card_html(target, snippet=snippet)
+        return build_blogcard_html(card_url, title or card_url, snippet=snippet,
+                                   internal=urlparse(card_url).netloc.lower() == SITE_DOMAIN)
 
     new_content = BLOGCARD_SHORTCODE_PATTERN.sub(_sub_nested_p, content_html)
     new_content = BLOGCARD_SHORTCODE_H3_PATTERN.sub(_sub_h3, new_content)
@@ -495,6 +633,7 @@ def convert_internal_links(
 
     has_external_ref = "note.com" in content_html or "exblog.jp" in content_html
     has_downgraded_card = "note-embed-link" in content_html  # 旧ロジックでの変換済みカード（要リッチカード化）
+    has_downgraded_card = has_downgraded_card or "internal-article-card" in content_html
     if not has_external_ref and not has_downgraded_card:
         return (content_html, replaced) if replaced else (content_html, 0)
 
@@ -505,6 +644,10 @@ def convert_internal_links(
     replaced += _replace_note_embed_cards(soup, note_map)
     # 旧ロジックで文字リンクまでダウングレードされてしまったカードをリッチカードへ戻す。
     replaced += _upgrade_simple_embed_links(soup, note_map)
+    # 自分の記事を指す外部カードを内部カードへ組み直す（後段のaタグ走査より先に行う）。
+    replaced += _upgrade_external_cards(soup, note_map, exblog_map)
+    # 2026-10-11以前の旧形式の内部カード（サムネイル無しがありうる）を現行形式へ組み直す。
+    replaced += _upgrade_legacy_internal_cards(soup, note_map, exblog_map)
 
     for a in soup.find_all("a", href=True):
         href = a["href"]
