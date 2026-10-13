@@ -67,9 +67,10 @@ def check(name, cond, detail=""):
     print(("✅ 合格" if cond else "❌ 不合格"), name, detail)
 
 
-def run(ctx, html, storage):
+def run(ctx, html, storage, codoc=None):
+    """codoc: None=Codoc未ログイン(トークン無し) / 'active'=購読中 / 'inactive'=ログイン中だが購読無効 /
+    'invalid'=トークン失効。Codoc APIはモックで応答する（本番非接触）。"""
     page = ctx.new_page()
-    ids_seen = {}
 
     def handler(route):
         url = route.request.url
@@ -83,11 +84,26 @@ def run(ctx, html, storage):
         else:
             route.fulfill(status=200, body="[]", content_type="application/json")
 
+    def codoc_handler(route):
+        url = route.request.url
+        cors = {"Access-Control-Allow-Origin": "http://test.local", "Access-Control-Allow-Credentials": "true"}
+        if "/users" in url:
+            body = {"status": True, "user": {"code": "u1", "name": "テスト読者"}} if codoc in ("active", "inactive") else {"status": False}
+        elif "/subscriptions/oEplngWcvQ" in url:
+            body = {"status": True, "subscription": {"code": "oEplngWcvQ"}} if codoc == "active" else {"subscription": None, "status": False}
+        else:
+            body = {"status": False}
+        route.fulfill(status=200, content_type="application/json", headers=cors, body=json.dumps(body))
+
     page.route("http://test.local/**", handler)
+    page.route("https://codoc.jp/**", codoc_handler)
     page.goto("http://test.local/blank")
-    page.evaluate("s => { localStorage.clear(); for (const k in s) localStorage.setItem(k, s[k]); }", storage)
+    st = dict(storage)
+    if codoc:
+        st["codocTokenCode"] = "tok-" + codoc
+    page.evaluate("s => { localStorage.clear(); sessionStorage.clear(); for (const k in s) localStorage.setItem(k, s[k]); }", st)
     page.goto("http://test.local/page")
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(1000)
     return page
 
 
@@ -99,14 +115,12 @@ with sync_playwright() as pw:
     browser = pw.chromium.launch()
     ctx = browser.new_context()
 
-    # A: 過去にサブスク利用の形跡あり＋ログイン済み＋プラン対象記事でロック中 → 期限切れ
-    p = run(ctx, detail_page(101, codoc_block(True, True, True)),
-            {"codoc_active_subscriber": "1", "nseb_purchased_posts": "[101,102]"})
+    # A: 新規ブラウザ（閲覧履歴なし）＋Codocログイン中・購読無効＋プラン対象記事でロック → 期限切れ
+    p = run(ctx, detail_page(101, codoc_block(True, True, True)), {"nseb_purchased_posts": "[101]"}, codoc="inactive")
     stat = p.inner_text(".nseb-stat-purchased")
     check("A1 期限切れフラグが立つ", ls(p, "codoc_subscription_expired") == "1")
-    check("A2 読み放題推定フラグが取り消される", ls(p, "codoc_active_subscriber") is None)
-    check("A3 詳細ページに期限切れ案内枠が出る", p.locator(".nseb-sub-expired-notice").count() == 1,
-          p.locator(".nseb-sub-expired-notice").inner_text() if p.locator(".nseb-sub-expired-notice").count() else "")
+    check("A2 読み放題推定フラグは無い", ls(p, "codoc_active_subscriber") is None)
+    check("A3 詳細ページに期限切れ案内枠が出る", p.locator(".nseb-sub-expired-notice").count() == 1)
     check("A4 ステータスバーが『サブスク期限切れ（要更新）』", "サブスク期限切れ" in stat, stat)
     check("A5 マイ本棚の既読記録は消えない", 101 in json.loads(ls(p, "nseb_purchased_posts")))
     check("A6 案内枠が統合案内枠より上にある",
@@ -114,59 +128,70 @@ with sync_playwright() as pw:
     check("A7 統合案内枠の復元ボタン文言", "購入済み・サブスクを復元" in p.inner_text(".nseb-purchase-guide-btn"))
     p.close()
 
-    # B: 期限切れ後にサブスク更新してアンロック → 期限切れ解除・既読/読み放題表示
-    p = run(ctx, detail_page(101, codoc_block(True, False, True)),
-            {"codoc_subscription_expired": "1", "nseb_purchased_posts": "[101,102]"})
+    # B: 購読中アカウントでアンロック → 期限切れ表示なし・読み放題
+    p = run(ctx, detail_page(101, codoc_block(True, False, True)), {"codoc_subscription_expired": "1"}, codoc="active")
     stat = p.inner_text(".nseb-stat-purchased")
-    check("B1 アンロックで期限切れフラグ解除", ls(p, "codoc_subscription_expired") is None)
+    check("B1 購読中なら期限切れフラグ解除", ls(p, "codoc_subscription_expired") is None)
     check("B2 期限切れ案内枠は出ない", p.locator(".nseb-sub-expired-notice").count() == 0)
-    check("B3 ステータスバーが既読/読み放題", ("読み放題" in stat) or ("既読" in stat), stat)
+    check("B3 ステータスバーが読み放題", "読み放題" in stat, stat)
     check("B4 『購入済み』表記が残っていない", "購入済み" not in stat, stat)
     p.close()
 
-    # C: ログイン済みだが一度もサブスク利用の形跡なし（未加入者） → 期限切れ扱いしない
-    p = run(ctx, detail_page(201, codoc_block(True, True, True)), {})
-    check("C1 未加入者は期限切れにならない", ls(p, "codoc_subscription_expired") is None)
-    check("C2 案内枠も出ない", p.locator(".nseb-sub-expired-notice").count() == 0)
+    # C: 新規ブラウザ・履歴ゼロでも、Codocログイン中・購読無効なら詳細ページで期限切れ（端末非依存）
+    p = run(ctx, detail_page(201, codoc_block(True, True, True)), {}, codoc="inactive")
+    check("C1 履歴ゼロでも期限切れ判定", ls(p, "codoc_subscription_expired") == "1")
+    check("C2 案内枠が出る", p.locator(".nseb-sub-expired-notice").count() == 1)
     p.close()
 
-    # D: 形跡あり・ログイン済みだが購読プラン未紐付け記事でロック → 期限切れ扱いしない
-    p = run(ctx, detail_page(301, codoc_block(True, True, False)),
-            {"codoc_active_subscriber": "1", "nseb_purchased_posts": "[101,102,301]"})
+    # D: 購読中アカウントで、購読プラン未紐付け記事がロック → 期限切れ扱いしない
+    p = run(ctx, detail_page(301, codoc_block(True, True, False)), {"nseb_purchased_posts": "[101,102,301]"}, codoc="active")
     check("D1 プラン未紐付け記事では期限切れにならない", ls(p, "codoc_subscription_expired") is None)
     check("D2 従来どおり誤った既読フラグは取り消される", 301 not in json.loads(ls(p, "nseb_purchased_posts")))
     p.close()
 
-    # E: 未ログイン（.codoc-user無し）でロック → 期限切れ判定しない（別端末・認証切れの可能性）
-    p = run(ctx, detail_page(101, codoc_block(False, True, True)),
-            {"codoc_active_subscriber": "1", "nseb_purchased_posts": "[101,102]"})
+    # E: Codoc未ログイン（トークン無し）でロック → 期限切れにしない（古いフラグも消える）
+    p = run(ctx, detail_page(101, codoc_block(False, True, True)), {"codoc_subscription_expired": "1"})
     check("E1 未ログインでは期限切れにならない", ls(p, "codoc_subscription_expired") is None)
+    check("E2 未ログインでは案内枠なし", p.locator(".nseb-sub-expired-notice").count() == 0)
     p.close()
 
     # F: 旧不具合の回帰確認：ログイン済み(.codoc-user)だけでアンロック扱いにしない
-    p = run(ctx, detail_page(401, codoc_block(True, True, False)), {})
+    p = run(ctx, detail_page(401, codoc_block(True, True, False)), {}, codoc="active")
     check("F1 .codoc-userのみでは既読フラグを立てない", ls(p, "nseb_purchased_posts") in (None, "[]"))
     p.close()
 
-    # G: マイ本棚＋一覧カード（期限切れ状態）
-    p = run(ctx, library_page([101, 102, 500, 900]),
-            {"codoc_subscription_expired": "1", "nseb_purchased_posts": "[101,102]"})
-    p.wait_for_selector("#post-101 .nseb-card-purchased")
+    # G: 新規ブラウザ（履歴ゼロ・フラグゼロ）でトップ一覧/マイ本棚 → Codoc照会だけで全有料記事に要サブスク更新
+    p = run(ctx, library_page([101, 102, 500, 900]), {}, codoc="inactive")
+    p.wait_for_selector("#post-500 .nseb-card-purchased.is-expired", timeout=5000)
     check("G1 マイ本棚に期限切れ案内", p.locator(".nseb-library-expired-notice").count() == 1)
-    b101 = p.inner_text("#post-101 .nseb-card-purchased")
-    check("G2 既読記事カードが『要サブスク更新』", "要サブスク更新" in b101, b101)
-    b500 = p.inner_text("#post-500 .nseb-card-purchased") if p.locator("#post-500 .nseb-card-purchased").count() else ""
-    check("G3 未読の100円記事(500)にも『要サブスク更新』", "要サブスク更新" in b500, b500)
-    check("G4 無料記事(900)には期限切れバッジを出さない",
-          p.locator("#post-900 .is-expired").count() == 0)
+    for i, label in ((101, "300円"), (102, "300円"), (500, "100円")):
+        loc = p.locator(f"#post-{i} .nseb-card-purchased")
+        t = loc.inner_text() if loc.count() else ""
+        check(f"G2 未読の{label}記事({i})に『要サブスク更新』", "要サブスク更新" in t, t)
+    check("G3 無料記事(900)には期限切れバッジを出さない", p.locator("#post-900 .is-expired").count() == 0)
     p.close()
 
-    # H: マイ本棚＋一覧カード（通常の既読、期限切れでない）
+    # H: 購読中アカウント → 一覧は読み放題、案内なし
+    p = run(ctx, library_page([101, 500]), {}, codoc="active")
+    p.wait_for_selector("#post-500 .nseb-card-purchased.is-readfree", timeout=5000)
+    check("H1 購読中は一覧が『読み放題』", "読み放題" in p.inner_text("#post-500 .nseb-card-purchased"))
+    check("H2 購読中は案内なし", p.locator(".nseb-library-expired-notice").count() == 0)
+    p.close()
+
+    # I: 未ログイン・既読履歴あり → 『✅既読』、期限切れなし
     p = run(ctx, library_page([101]), {"nseb_purchased_posts": "[101]"})
     p.wait_for_selector("#post-101 .nseb-card-purchased")
     b = p.inner_text("#post-101 .nseb-card-purchased")
-    check("H1 既読カードが『✅既読』", "既読" in b and "購入済み" not in b, b)
-    check("H2 期限切れでなければ案内なし", p.locator(".nseb-library-expired-notice").count() == 0)
+    check("I1 既読カードが『✅既読』", "既読" in b and "購入済み" not in b, b)
+    check("I2 未ログインなら案内なし", p.locator(".nseb-library-expired-notice").count() == 0)
+    p.close()
+
+    # J: 古い期限切れフラグが残っていても、トークン失効（ログアウト扱い）なら表示を消す
+    p = run(ctx, library_page([101, 500]), {"codoc_subscription_expired": "1"}, codoc="invalid")
+    p.wait_for_timeout(500)
+    check("J1 トークン失効で期限切れフラグ解除", ls(p, "codoc_subscription_expired") is None)
+    check("J2 一覧に期限切れバッジが残らない", p.locator(".nseb-card-purchased.is-expired").count() == 0)
+    check("J3 マイ本棚の案内も消える", p.locator(".nseb-library-expired-notice").count() == 0)
     p.close()
 
     browser.close()

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.14.1
+ * Version: 4.15.0
  * Author: junchan-world
  */
 
@@ -686,10 +686,96 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   //     紐付いている場合にのみ描画される
   // と確認できた。したがって「Codocにログイン済み（.codoc-user有り）なのに、
   // 購読プラン対象記事で購入ボタンが出ている」＝そのアカウントのサブスクは
-  // 現在有効ではない、と判定できる。過去にこのブラウザでサブスク利用の形跡が
-  // ある場合に限り「期限切れ」とみなしてこのフラグを立てる（一度も加入して
-  // いない読者を「期限切れ」と呼ばないため）。
+  // 現在有効ではない、と判定できる。
+  // 【同日改修：端末非依存化】このフラグは「ブラウザの過去の痕跡」ではなく、
+  // syncCodocAccountState()がCodoc API（アカウント単位）に照会した最新結果の
+  // キャッシュとしてのみ使う（初回描画を速くするためだけの一時保存）。
   var SUBSCRIPTION_EXPIRED_KEY = 'codoc_subscription_expired';
+
+  // 【2026-10-13追記：Codocアカウント単位での購読状態の照会】
+  // Codoc公式ウィジェット（cms-core.js v7.1.3）の実装を解析し、以下を確認した：
+  //   - Codocにログインすると、ログイントークンが本サイトのlocalStorage/Cookie
+  //     （codocTokenCode）に保存される（ログアウトで削除）。
+  //   - GET {codoc}/api/v1/paywall/{サイト運営者コード}/users?paywall_token_code=…
+  //     が {status:true, user:{…}} を返せば、そのトークンは有効なログイン中アカウント。
+  //   - GET {codoc}/api/v1/paywall/{サイト運営者コード}/subscriptions/{プランコード}
+  //     ?paywall_token_code=… が status:true を返せば、そのアカウントは購読プランを
+  //     現在保有している（公式ウィジェットはこの結果で購読ボタンを無効化する）。
+  //     有効でない（期限切れ・解約済み・未加入）場合は {subscription:null,status:false}。
+  //   - どちらも https://junchan-world.com からのCORSが許可されている（実機確認済み）。
+  // つまり「Codocにログインしているか」「そのアカウントの購読が有効か」は、
+  // 端末や閲覧履歴に関係なくアカウント単位で判定できる。注意：このAPIでは
+  // 「期限切れ・解約済み」と「一度も加入していない」を区別できないため、
+  // どちらも「要サブスク更新」として扱う。
+  var CODOC_API_BASE = 'https://codoc.jp/api/v1/paywall/tlWA9Gh9aA';
+  var CODOC_PLAN_CODE = CONTENT_SUBSCRIPTION_DOM_ID.replace(/^codoc-subscription-/, '');
+  var CODOC_ACCOUNT_CACHE_KEY = 'nseb_codoc_account_state';
+  var CODOC_ACCOUNT_CACHE_MS = 2 * 60 * 1000;
+
+  function getCodocToken() {
+    try {
+      var t = window.localStorage.getItem('codocTokenCode');
+      if (t) { return t; }
+    } catch (e) {}
+    var m = document.cookie.match(/(?:^|;\s*)codocTokenCode=([^;]+)/);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  // 結果: 'active'（購読中） / 'inactive'（ログイン中だが購読が有効でない）/
+  // 'anonymous'（未ログイン・トークン無効） / null（通信失敗＝判定保留）。
+  function fetchCodocAccountState() {
+    var token = getCodocToken();
+    if (!token) { return Promise.resolve('anonymous'); }
+    try {
+      var cached = JSON.parse(window.sessionStorage.getItem(CODOC_ACCOUNT_CACHE_KEY) || 'null');
+      if (cached && cached.token === token && Date.now() - cached.at < CODOC_ACCOUNT_CACHE_MS) {
+        return Promise.resolve(cached.state);
+      }
+    } catch (e) {}
+    var q = '?paywall_token_code=' + encodeURIComponent(token) + '&_=' + Date.now();
+    var get = function (path) {
+      return fetch(CODOC_API_BASE + path + q, { credentials: 'include', cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; });
+    };
+    return Promise.all([get('/users'), get('/subscriptions/' + CODOC_PLAN_CODE)])
+      .then(function (res) {
+        var user = res[0], sub = res[1];
+        if (!user || !sub) { return null; }
+        var state = !user.status ? 'anonymous' : (sub.status ? 'active' : 'inactive');
+        try {
+          window.sessionStorage.setItem(CODOC_ACCOUNT_CACHE_KEY, JSON.stringify({ token: token, state: state, at: Date.now() }));
+        } catch (e) {}
+        return state;
+      })
+      .catch(function () { return null; });
+  }
+
+  // 照会結果をローカルの表示用フラグへ反映し、表示が変わる場合は再描画する。
+  // 'anonymous'（ログアウト等）では期限切れ表示を消す（未ログインでは
+  // アカウントの状態を判定できないため）。通信失敗（null）は何も変えない。
+  // refreshAll()はPJAX・bfcache復元で何度も呼ばれるため、配列に積まず
+  // 「一覧カード」「ステータスバー」「マイ本棚案内」「詳細ページ案内」の
+  // 名前付きスロットに最新の再描画関数だけを保持する（重複実行を防ぐ）。
+  var accountStateRerenderers = {};
+  function syncCodocAccountState() {
+    return fetchCodocAccountState().then(function (state) {
+      if (state === null) { return; }
+      var beforeExpired = isSubscriptionExpired();
+      var beforeActive = isActiveSubscriber();
+      if (state === 'active') {
+        markActiveSubscriber();
+      } else if (state === 'inactive') {
+        markSubscriptionExpired();
+      } else {
+        clearSubscriptionExpired();
+      }
+      if (beforeExpired !== isSubscriptionExpired() || beforeActive !== isActiveSubscriber()) {
+        Object.keys(accountStateRerenderers).forEach(function (k) {
+          try { accountStateRerenderers[k](); } catch (e) {}
+        });
+      }
+    });
+  }
 
   function isActiveSubscriber() {
     try { return window.localStorage.getItem(ACTIVE_SUBSCRIBER_KEY) === '1'; } catch (e) { return false; }
@@ -1473,12 +1559,14 @@ button.nseb-card-badge:active{transform:scale(1.08);}
         // それでもロック中＝このCodocアカウントのサブスクは現在有効ではない。
         // 購読プランに紐付いていない記事（section 18の紐付け外れ等）では
         // 購読プラン一覧自体が描画されないため、ここで誤って期限切れ扱いに
-        // なることはない。さらに「このブラウザで過去にサブスク利用の形跡が
-        // ある」場合に限定し、一度も加入していない読者は対象外にする。
+        // なることはない。
+        // 【同日改修：端末依存の条件を全廃】以前は「このブラウザで過去にサブスク
+        // 利用の形跡がある」ことも条件にしていたが、スマホ・新規ブラウザでは
+        // 形跡が無いため一切発火しない不具合が実機で報告された。判定はCodoc
+        // アカウントの状態（ここではウィジェットDOM、一覧ではsyncCodocAccountState
+        // のCodoc API照会）だけに基づかせる。
         var offersSubscription = !!container.querySelector('.codoc-subscription-title, .codoc-subscription-info');
-        var hadSubscriberHistory = isActiveSubscriber() || isSubscriptionExpired()
-          || getPurchasedSet().length >= SUBSCRIBER_INFERENCE_THRESHOLD;
-        var expiredNow = hasUser && offersSubscription && hadSubscriberHistory;
+        var expiredNow = hasUser && offersSubscription;
         if (expiredNow) {
           markSubscriptionExpired();
           showSubscriptionExpiredNotice(container);
@@ -1643,6 +1731,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     // 解消するのが目的。renderPurchaseBadgeのコメント参照）。
     checkCodocPurchaseState(postId, renderPurchaseBadge);
     renderPurchaseBadge();
+    accountStateRerenderers.statusBar = renderPurchaseBadge;
 
     // postView(postId) は「このページを開いた」というPVを実際に+1記録し、
     // ついでにこの1記事分だけCodocの価格・購入数キャッシュもライブ更新する
@@ -1938,6 +2027,9 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     fetchCardData(ids).then(function (data) {
       if (!data) { return; }
       renderCardBadges(idToMetaEl, data);
+      // Codocアカウント照会（syncCodocAccountState）の結果が後から届いて
+      // 期限切れ/購読中の状態が変わった場合に、同じデータで再描画できるようにする。
+      accountStateRerenderers.cards = function () { renderCardBadges(idToMetaEl, data); };
     });
   }
 
@@ -1964,14 +2056,34 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     }
   }
 
+  // 詳細ページ：Codocアカウント照会で「ログイン中だが購読が有効でない」と
+  // 分かった時点で、ウィジェットの描画完了を待たずに期限切れ案内枠を出す
+  // （この記事のアンロックを実際に観測できた場合は出さない）。
+  function syncDetailExpiredNotice() {
+    var container = document.querySelector('.wp-block-codoc-codoc-block');
+    if (!container) { return; }
+    var postId = getCurrentPostIdFromBody();
+    var existing = document.querySelector('.nseb-sub-expired-notice:not(.nseb-library-expired-notice)');
+    if (isSubscriptionExpired() && codocLiveVerdict[postId] !== true) {
+      showSubscriptionExpiredNotice(container);
+    } else if (existing) {
+      existing.parentNode.removeChild(existing);
+    }
+  }
+
   function refreshAll() {
     initStatusBar();
     initCardBadges();
     wireMyLibraryLinks();
     initMyLibraryExpiredNotice();
     initRestoreBanner();
+    syncDetailExpiredNotice();
     ensurePurchaseDetectionFallback();
     applyRelatedEntriesContextOverride();
+    accountStateRerenderers.libraryNotice = initMyLibraryExpiredNotice;
+    accountStateRerenderers.detailNotice = syncDetailExpiredNotice;
+    // 【2026-10-13追記】端末に依存しない、Codocアカウント単位の購読状態照会。
+    syncCodocAccountState();
   }
   // 【2026-09-02追記：PJAX対応】custom-search-filter.phpのPJAX（#mainのみを
   // fetch()で差し替える非同期部分更新）は、通常のDOMContentLoaded/pageshowを
