@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.32.0
+ * Version: 1.33.0
  * Author: junchan-world
  */
 
@@ -389,7 +389,11 @@ class Custom_Search_Category_Filter {
 
     /**
      * 「マイ本棚」ビュー（?view=my-library）の一覧上部に、3つの切り替え
-     * タブ（購入した記事/スキした記事/購入&スキ）を出力する。実際の
+     * タブ（サブスク既読記事/スキした記事/サブスク既読記事＆スキ）を出力する。
+     * 【2026-10-13追記：文言変更】旧「購入した記事」「購入＆スキ（両方）」は、
+     * 実態がCodocウィジェットのアンロック観測（＝ほぼサブスクで読んだ記事）で
+     * あり「購入」と書くと誤解を招くため変更した。data-tab値（purchased/both）や
+     * クエリ変数（purchased_ids[]）は既存のブックマークURL互換のため据え置く。実際の
      * href（?purchased_ids[]=.../liked_ids[]=...）は、LocalStorageの現在の
      * 記事ID一覧を読める側＝JS（note-style-engagement.php の
      * wireMyLibraryLinks）が後から書き換える。ここではdata-tab属性付きの
@@ -418,9 +422,9 @@ class Custom_Search_Category_Filter {
         }
         ?>
 <div id="nseb-my-library-tabs" style="margin:0 0 1.5em;text-align:center;">
-  <a href="#" data-tab="purchased" class="nseb-library-tab<?php echo $current_tab === 'purchased' ? ' is-active' : ''; ?>">🛒 購入した記事</a>
+  <a href="#" data-tab="purchased" class="nseb-library-tab<?php echo $current_tab === 'purchased' ? ' is-active' : ''; ?>">📖 サブスク既読記事</a>
   <a href="#" data-tab="liked" class="nseb-library-tab<?php echo $current_tab === 'liked' ? ' is-active' : ''; ?>">♥ スキした記事</a>
-  <a href="#" data-tab="both" class="nseb-library-tab<?php echo $current_tab === 'both' ? ' is-active' : ''; ?>">🌟 購入＆スキ（両方）</a>
+  <a href="#" data-tab="both" class="nseb-library-tab<?php echo $current_tab === 'both' ? ' is-active' : ''; ?>">🌟 サブスク既読記事＆スキ</a>
 </div>
         <?php
     }

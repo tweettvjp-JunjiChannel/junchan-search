@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.13.0
+ * Version: 4.14.0
  * Author: junchan-world
  */
 
@@ -575,6 +575,12 @@ button.nseb-card-badge:active{transform:scale(1.08);}
 .nseb-card-badge.nseb-card-purchased.is-readfree{background:#e3eefb;color:#2f6690;}
 .nseb-stat-purchased.is-purchased{color:#e0245e;font-weight:bold;}
 .nseb-stat-purchased.is-readfree{color:#2f6690;font-weight:bold;}
+.nseb-card-badge.nseb-card-purchased.is-expired{background:#fff1d6;color:#b35900;}
+.nseb-stat-purchased.is-expired{color:#b35900;font-weight:bold;}
+.nseb-sub-expired-notice{margin:1.2em 0;padding:.9em 1.1em;border:2px solid #f0a020;border-radius:10px;background:#fff8e6;color:#5a3a00;}
+.nseb-sub-expired-notice p{margin:0;line-height:1.7;}
+.nseb-sub-expired-title{font-weight:bold;color:#b35900;margin-bottom:.35em !important;}
+.nseb-sub-expired-text{font-size:.92em;}
 #nseb-my-library-tabs{display:flex;flex-wrap:wrap;gap:.5em;justify-content:center;}
 .nseb-library-tab{display:inline-block;padding:.5em 1em;border-radius:999px;background:#f1f1f1;color:#555;text-decoration:none;font-size:.92em;font-weight:bold;white-space:nowrap;}
 .nseb-library-tab.is-active{background:#333;color:#fff;}
@@ -670,12 +676,41 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   // 採用する。単体購入を2件以上した読者を誤検知するごく小さな可能性は残るが、
   // 根拠の無いDOM/URL推測よりはるかに安全側に倒した設計。
   var SUBSCRIBER_INFERENCE_THRESHOLD = 2;
+  // 【2026-10-13追記：サブスク期限切れの検知】以前はACTIVE_SUBSCRIBER_KEYが
+  // 一度立つと二度と消えず、月額サブスクの期限が切れた後も一覧に
+  // 「📖読み放題」が出続け、読者が「まだ読める」と誤解する不具合があった。
+  // Codoc公式ウィジェット（cms-core.js v7.1.3）を実際に取得して解析した結果、
+  //   - .codoc-buy-wrap は v-show="ownedEntry == false"（＝閲覧権が無い間だけ表示）
+  //   - .codoc-user は「Codocにログインしていれば」閲覧権の有無に関係なく表示
+  //   - 購読プラン一覧（.codoc-subscription-title等）は、その記事が購読プランに
+  //     紐付いている場合にのみ描画される
+  // と確認できた。したがって「Codocにログイン済み（.codoc-user有り）なのに、
+  // 購読プラン対象記事で購入ボタンが出ている」＝そのアカウントのサブスクは
+  // 現在有効ではない、と判定できる。過去にこのブラウザでサブスク利用の形跡が
+  // ある場合に限り「期限切れ」とみなしてこのフラグを立てる（一度も加入して
+  // いない読者を「期限切れ」と呼ばないため）。
+  var SUBSCRIPTION_EXPIRED_KEY = 'codoc_subscription_expired';
 
   function isActiveSubscriber() {
     try { return window.localStorage.getItem(ACTIVE_SUBSCRIBER_KEY) === '1'; } catch (e) { return false; }
   }
   function markActiveSubscriber() {
     try { window.localStorage.setItem(ACTIVE_SUBSCRIBER_KEY, '1'); } catch (e) {}
+    clearSubscriptionExpired();
+  }
+  function isSubscriptionExpired() {
+    try { return window.localStorage.getItem(SUBSCRIPTION_EXPIRED_KEY) === '1'; } catch (e) { return false; }
+  }
+  // 期限切れを検知したら、古い「サブスク加入中」推定フラグも同時に取り消す
+  // （残しておくと一覧で「読み放題」が出続け、本項の不具合そのものになる）。
+  function markSubscriptionExpired() {
+    try {
+      window.localStorage.setItem(SUBSCRIPTION_EXPIRED_KEY, '1');
+      window.localStorage.removeItem(ACTIVE_SUBSCRIBER_KEY);
+    } catch (e) {}
+  }
+  function clearSubscriptionExpired() {
+    try { window.localStorage.removeItem(SUBSCRIPTION_EXPIRED_KEY); } catch (e) {}
   }
   // 依頼にあった「?codoc_conversion=subscription」URLパラメータの検知。
   // 実在するかどうか2026-08-26時点では確認できていないが、チェックすること
@@ -843,6 +878,16 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   function effectivePurchased(postId) {
     return isPurchased(postId) || subscriberAppliesTo(postId);
   }
+  // 【2026-10-13追記】この記事について「サブスク期限切れ（要更新）」を表示
+  // すべきか。サブスク期限切れフラグが立っており、かつ (a) このブラウザで過去に
+  // 既読（アンロック）済みの記事か、(b) 今まさにこの詳細ページでロックを
+  // 直接観測した記事、のいずれか。このセッションで実際にアンロックを確認
+  // できた記事（単品購入済み等）は期限切れ扱いにしない。
+  function expiredAppliesTo(postId) {
+    if (!isSubscriptionExpired()) { return false; }
+    if (codocLiveVerdict[postId] === true) { return false; }
+    return isPurchased(postId) || codocLiveVerdict[postId] === false;
+  }
 
   // 【2026-08-26 追記：購入済みバッジの表示ロジックを一本化】以前は「色だけ
   // 赤くして文言は『0人が購入』のまま」という中途半端な実装になっており、
@@ -877,13 +922,22 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   // という混乱を招く不具合が実機で報告された。サブスク加入者であることが
   // 分かっている場合は、個別購入の検出よりも「読み放題」を優先して表示する
   // （サブスク加入者がわざわざ同じ記事を個別購入している方が稀なケースのため）。
-  function computeAccessBadgeState(purchasedCount, individuallyPurchased, isSubscriber) {
+  // 【2026-10-13追記】mode='expired'（橙）: サブスク期限切れ（expiredAppliesTo）。
+  // 「既読」より優先して「要サブスク更新」を明示する（期限切れなのに
+  // 「既読」と出すと、そのまま読めると誤解させるため）。
+  // 【同日追記：文言変更】mode='purchased' はCodocウィジェットのアンロック観測に
+  // 由来し、実態はほぼ「サブスクで読んだ記事」のため、表示を「購入済み」から
+  // 「既読」へ変更した（モード名・LocalStorageキーは互換性のため据え置き）。
+  function computeAccessBadgeState(purchasedCount, individuallyPurchased, isSubscriber, isExpired) {
     var isPaidArticle = purchasedCount !== null && typeof purchasedCount !== 'undefined';
     if (!isPaidArticle) {
       return { show: false, mode: null };
     }
     if (isSubscriber) {
       return { show: true, mode: 'readfree' };
+    }
+    if (isExpired) {
+      return { show: true, mode: 'expired' };
     }
     if (individuallyPurchased) {
       return { show: true, mode: 'purchased' };
@@ -900,16 +954,20 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     if (!el) { return; }
     el.hidden = !state.show;
     el.style.display = state.show ? '' : 'none';
-    el.classList.remove('is-purchased', 'is-readfree');
+    el.classList.remove('is-purchased', 'is-readfree', 'is-expired');
     el.textContent = '';
     if (!state.show) { return; }
     var icon = document.createElement('span');
     icon.className = 'nseb-stat-icon';
     var label;
-    if (state.mode === 'purchased') {
+    if (state.mode === 'expired') {
+      el.classList.add('is-expired');
+      icon.textContent = '⚠️';
+      label = 'サブスク期限切れ（要更新）';
+    } else if (state.mode === 'purchased') {
       el.classList.add('is-purchased');
-      icon.textContent = '🛒';
-      label = '購入済み';
+      icon.textContent = '✅';
+      label = '既読（サブスク/購入）';
     } else if (state.mode === 'readfree') {
       el.classList.add('is-readfree');
       icon.textContent = '📖';
@@ -1056,7 +1114,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
       + '<div class="nseb-purchase-guide-divider"></div>'
       + '<div class="nseb-purchase-guide-restore">'
       + '<p class="nseb-purchase-guide-restore-text">※パソコンやスマホなど、本登録したデバイス以外で初めて読む場合は、下記のボタンを押してください。</p>'
-      + '<button type="button" class="nseb-purchase-guide-btn">🔄 ログインして購入済みを復元する</button>'
+      + '<button type="button" class="nseb-purchase-guide-btn">🔄 ログインして購入済み・サブスクを復元する</button>'
       + '</div>';
     container.parentNode.insertBefore(guide, container);
     var btn = guide.querySelector('.nseb-purchase-guide-btn');
@@ -1098,6 +1156,45 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     var container = document.querySelector('.wp-block-codoc-codoc-block');
     if (!container) { return; }
     insertPurchaseGuide(container);
+  }
+
+  // 【2026-10-13追記：サブスク期限切れの明示】checkCodocPurchaseStateが
+  // 「Codocログイン済み・購読プラン対象記事なのにロックされている」状態を
+  // 検知した際、Codocブロック（と統合案内枠）の直前に、期限切れであることと
+  // 更新方法を明示する案内枠を出す。期限切れ読者は既にCodocにログイン済み
+  // のため「ログインして復元」ではなく「購読プランの更新」へ誘導する。
+  function showSubscriptionExpiredNotice(container) {
+    if (!container || document.querySelector('.nseb-sub-expired-notice')) { return; }
+    var notice = document.createElement('div');
+    notice.className = 'nseb-sub-expired-notice';
+    notice.innerHTML =
+      '<p class="nseb-sub-expired-title">⚠️ 月額サブスクの有効期限が切れています（要サブスク更新）</p>'
+      + '<p class="nseb-sub-expired-text">この記事の有料部分を読むには、サブスクの更新が必要です。'
+      + 'この枠の下の「購読プランを購入」から更新すると、過去記事も含めて再びすべて読み放題になります。</p>';
+    var guide = document.querySelector('.nseb-purchase-guide');
+    var anchor = (guide && guide.parentNode === container.parentNode) ? guide : container;
+    anchor.parentNode.insertBefore(notice, anchor);
+  }
+
+  // 「マイ本棚」（?view=my-library）では、サブスク期限切れのブラウザに対して
+  // タブの上に期限切れの案内を出す（「サブスク既読記事」はサブスク有効期間中に
+  // 読んだ記事であり、期限切れ後は続きを読むのに更新が必要なため）。
+  function initMyLibraryExpiredNotice() {
+    var tabs = document.getElementById('nseb-my-library-tabs');
+    if (!tabs) { return; }
+    var existing = document.querySelector('.nseb-library-expired-notice');
+    if (!isSubscriptionExpired()) {
+      if (existing) { existing.parentNode.removeChild(existing); }
+      return;
+    }
+    if (existing) { return; }
+    var notice = document.createElement('div');
+    notice.className = 'nseb-sub-expired-notice nseb-library-expired-notice';
+    notice.innerHTML =
+      '<p class="nseb-sub-expired-title">⚠️ 月額サブスクの有効期限が切れています（要サブスク更新）</p>'
+      + '<p class="nseb-sub-expired-text">「サブスク既読記事」の有料部分を再び読むには、サブスクの更新が必要です。'
+      + '記事を開き、記事内の「購読プランを購入」から更新してください。</p>';
+    tabs.parentNode.insertBefore(notice, tabs);
   }
 
   // 【2026-09-20追記：購入検知がステータスバー消失に巻き込まれて機能停止する
@@ -1163,12 +1260,28 @@ button.nseb-card-badge:active{transform:scale(1.08);}
       + '</a>';
   }
 
+  // 【2026-09-21追記：サムネイル無し記事を混入させない】サーバー側の
+  // デフォルト（fix_related_entries_query_args）はmeta_query
+  // (_thumbnail_id EXISTS)で必ずサムネイル付き記事だけを選ぶ設計だが、
+  // このクライアント側REST経由の候補にはその保証が無かった。実機検証で、
+  // featured_mediaは正しく設定されているのに_embeddedが丸ごと欠落する
+  // （fetchRelatedByQuery側の_fields制限が原因。下記参照）ケースを確認
+  // 済みだが、それとは別に「本当にサムネイル未設定の記事」が候補に混ざる
+  // 可能性自体は残るため、二重の安全策としてここでも除外する。
+  function hasFeaturedThumbnail(p) {
+    var media = p._embedded && p._embedded['wp:featuredmedia'] && p._embedded['wp:featuredmedia'][0];
+    return !!(media && media.source_url && !media.code);
+  }
+
   // REST APIから取得した候補一覧を関連記事枠へ描画する。0件時は何もせず
   // サーバー側のデフォルト（本文引用順等）をそのまま残す（絞り込み条件に
   // 一致する記事が無いのに空にしてしまうと、読者にとって「通常時より情報が
   // 減る」という改悪になるため）。
   function renderRelatedOverride(list, posts, currentId) {
-    posts = (posts || []).filter(function (p) { return p.id !== currentId; }).slice(0, RELATED_OVERRIDE_COUNT);
+    posts = (posts || [])
+      .filter(function (p) { return p.id !== currentId; })
+      .filter(hasFeaturedThumbnail)
+      .slice(0, RELATED_OVERRIDE_COUNT);
     if (!posts.length) { return false; }
     var html = posts.map(function (p) {
       var media = p._embedded && p._embedded['wp:featuredmedia'] && p._embedded['wp:featuredmedia'][0];
@@ -1194,10 +1307,22 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   // クライアント側でタイトルにキーワードを含むものを先頭へ安定ソート
   // （Array.prototype.sortはES2019以降で安定ソートが仕様上保証されている）
   // してから上位6件を採用する。
+  //
+  // 【2026-09-21追記：関連記事サムネイル欠落バグの根本原因】従来は
+  // `_fields=id,link,title,excerpt&_embed=wp:featuredmedia` を併用して
+  // いたが、実機のREST APIレスポンスを直接検証した結果、WordPress標準の
+  // `_fields` によるフィールド絞り込みは、`_embed` で追加されるはずの
+  // `_embedded`（wp:featuredmedia本体）ごと丸ごと欠落させることを確認した
+  // （`_fields`に`_embedded`を明示的に含めても復活しない）。この欠落により
+  // featured_mediaが正しく設定済みの記事でもimgUrlが常に空文字となり、
+  // 検索・カテゴリー一覧経由で開いた記事下の関連記事サムネイルが全て
+  // デフォルトのグレーアイコンになる不具合を引き起こしていた（通常経路は
+  // サーバーサイドPHPで完結するため無関係で影響を受けない）。対策として
+  // `_fields`によるレスポンス縮小を諦め、`_embed`のみを指定する（受信サイズは
+  // 増えるが、per_page=20件・絞り込み時のみの発火のため許容範囲）。
   function fetchRelatedByQuery(list, currentId, queryString, titleKeyword) {
     var url = restRoot.replace('/engage/v1', '') + '/wp/v2/posts?' + queryString
       + '&per_page=20'
-      + '&_fields=id,link,title,excerpt'
       + '&_embed=wp:featuredmedia'
       + '&_=' + Date.now();
     fetch(url, { cache: 'no-store' })
@@ -1304,9 +1429,23 @@ button.nseb-card-badge:active{transform:scale(1.08);}
       var bodyAfterEl = container.querySelector('.codoc-entry-body-after');
       var hasUnlockedBody = !!(bodyAfterEl && bodyAfterEl.textContent && bodyAfterEl.textContent.trim().length > 0);
 
-      if (buyWrapHidden || hasUser || hasUnlockedBody) {
+      // 【2026-10-13修正：.codoc-user を陽性シグナルから除外】Codoc公式の
+      // cms-core.js（v7.1.3）を解析した結果、.codoc-user は
+      // `loginUser && cmsInfo.showLogin == 1` だけを条件に描画され、閲覧権
+      // （ownedEntry）とは無関係だと判明した。つまり「Codocにログインしている
+      // がサブスク期限切れ」の読者でも .codoc-user は出るため、これを購入済みの
+      // 根拠にすると、期限切れ読者を「既読/読み放題」と誤表示してしまう
+      // （今回報告された不具合の直接原因）。閲覧権を正しく表すのは
+      // v-show="ownedEntry == false" の .codoc-buy-wrap 非表示と、本文の
+      // 続き（.codoc-entry-body-after）の流し込みの2つのみ。section 15の実購入者
+      // HTMLでも.codoc-buy-wrapの非表示は満たされていたため、この除外で
+      // 実購入者の検知が失われることはない。
+      if (buyWrapHidden || hasUnlockedBody) {
         codocLiveVerdict[postId] = true;
         markPurchased(postId);
+        clearSubscriptionExpired();
+        var expiredNotice = document.querySelector('.nseb-sub-expired-notice');
+        if (expiredNotice) { expiredNotice.parentNode.removeChild(expiredNotice); }
         hideUpsellBanners();
         // 【2026-08-26追記】このブラウザが異なる記事を複数（閾値以上）
         // 購入済み/アンロック済みと検出した場合、サブスク加入者である可能性が
@@ -1322,7 +1461,26 @@ button.nseb-card-badge:active{transform:scale(1.08);}
         // （subscriberAppliesTo/effectivePurchasedのコメント参照）。
         var wasFlagged = isPurchased(postId);
         codocLiveVerdict[postId] = false;
-        if (wasFlagged) { removePurchased(postId); }
+
+        // 【2026-10-13追記：サブスク期限切れの検知】ログイン済み（.codoc-user）
+        // ＋この記事が購読プラン対象（購読プラン一覧が描画されている）＋
+        // それでもロック中＝このCodocアカウントのサブスクは現在有効ではない。
+        // 購読プランに紐付いていない記事（section 18の紐付け外れ等）では
+        // 購読プラン一覧自体が描画されないため、ここで誤って期限切れ扱いに
+        // なることはない。さらに「このブラウザで過去にサブスク利用の形跡が
+        // ある」場合に限定し、一度も加入していない読者は対象外にする。
+        var offersSubscription = !!container.querySelector('.codoc-subscription-title, .codoc-subscription-info');
+        var hadSubscriberHistory = isActiveSubscriber() || isSubscriptionExpired()
+          || getPurchasedSet().length >= SUBSCRIBER_INFERENCE_THRESHOLD;
+        var expiredNow = hasUser && offersSubscription && hadSubscriberHistory;
+        if (expiredNow) {
+          markSubscriptionExpired();
+          showSubscriptionExpiredNotice(container);
+        }
+        // 期限切れの場合、過去にサブスクで読んだ記録（マイ本棚の
+        // 「サブスク既読記事」）は消さずに残す（「要サブスク更新」として
+        // 表示し続けるため）。それ以外は従来どおり誤ったフラグを取り消す。
+        if (wasFlagged && !expiredNow) { removePurchased(postId); }
       }
       if (typeof onVerdict === 'function') { onVerdict(codocLiveVerdict[postId]); }
     }
@@ -1455,14 +1613,16 @@ button.nseb-card-badge:active{transform:scale(1.08);}
       if (lastKnownPurchasedCount === null) {
         // まだサーバー応答が無い＝件数不明の暫定描画。LocalStorage由来の
         // フラグが立っている場合のみ、その場で分かるモードを先出しする。
-        if (effectivePurchased(postId)) {
+        if (expiredAppliesTo(postId)) {
+          renderAccessStat(purchasedEl, { show: true, mode: 'expired' }, null);
+        } else if (effectivePurchased(postId)) {
           var earlyMode = subscriberAppliesTo(postId) ? 'readfree' : 'purchased';
           renderAccessStat(purchasedEl, { show: true, mode: earlyMode }, null);
           hideUpsellBanners();
         }
         return;
       }
-      var accessState = computeAccessBadgeState(lastKnownPurchasedCount, isPurchased(postId), subscriberAppliesTo(postId));
+      var accessState = computeAccessBadgeState(lastKnownPurchasedCount, isPurchased(postId), subscriberAppliesTo(postId), expiredAppliesTo(postId));
       renderAccessStat(purchasedEl, accessState, lastKnownPurchasedCount);
       if (accessState.mode === 'purchased' || accessState.mode === 'readfree') {
         hideUpsellBanners();
@@ -1645,13 +1805,16 @@ button.nseb-card-badge:active{transform:scale(1.08);}
       // 【2026-08-28修正】アクセス状態バッジ（購入済み/読み放題/購入者数）は
       // 価格バッジの直前に表示する（元の価格は消さずそのまま併記する仕様。
       // computeAccessBadgeStateのコメント参照）。
-      var accessState = computeAccessBadgeState(d.purchased_count, isPurchased(numericId), subscriberAppliesTo(numericId));
+      var accessState = computeAccessBadgeState(d.purchased_count, isPurchased(numericId), subscriberAppliesTo(numericId), expiredAppliesTo(numericId));
       if (accessState.show) {
         var accessBadge = document.createElement('span');
         var accessLabel;
-        if (accessState.mode === 'purchased') {
+        if (accessState.mode === 'expired') {
+          accessBadge.className = 'nseb-card-badge nseb-card-purchased is-expired';
+          accessLabel = '⚠️要サブスク更新';
+        } else if (accessState.mode === 'purchased') {
           accessBadge.className = 'nseb-card-badge nseb-card-purchased is-purchased';
-          accessLabel = '🛒購入済み';
+          accessLabel = '✅既読';
         } else if (accessState.mode === 'readfree') {
           accessBadge.className = 'nseb-card-badge nseb-card-purchased is-readfree';
           accessLabel = '📖読み放題';
@@ -1799,6 +1962,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     initStatusBar();
     initCardBadges();
     wireMyLibraryLinks();
+    initMyLibraryExpiredNotice();
     initRestoreBanner();
     ensurePurchaseDetectionFallback();
     applyRelatedEntriesContextOverride();

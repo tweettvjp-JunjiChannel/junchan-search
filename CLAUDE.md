@@ -190,6 +190,13 @@ note記事内の外部サイトへのリンクは、note.com側が独自CSSで�
 ### Codoc購読プラン紐付けを壊す操作の横断的な安全網（`relink_touched_posts`）
 content更新に限らずcategories等の更新だけでもCodoc側の購読プラン紐付けが解除される副作用がある（9/1項参照）。この安全網ロジックを`auto_sync_blogs.relink_touched_posts(wp, log_rows, execute)`として関数化し、`sync_weekly.py`・`sync_monthly_maintenance.py`・`backfill_external_blogcards.py`・`auto_sync_blogs.py`本体の全経路から共通利用する設計にした。**WordPress投稿のcontentやcategoriesを書き換える新しい処理を追加する場合、処理の最後に必ずこの関数（またはCodoc有料記事なら`backfill_codoc_subscription_linkage.process_entry`個別呼び出し）を経由させること。**
 
+## 19. マイ本棚の文言変更とサブスク期限切れ表示（2026-10-13 追記）
+- **文言変更**：マイ本棚タブ「購入した記事」→「📖 サブスク既読記事」、「購入＆スキ（両方）」→「🌟 サブスク既読記事＆スキ」、一覧カード「🛒購入済み」→「✅既読」、記事ステータスバー「購入済み」→「既読（サブスク/購入）」。実態がCodocウィジェットのアンロック観測（＝ほぼサブスクで読んだ記事）のため。`data-tab`値（purchased/both）・`purchased_ids[]`・LocalStorageキー（`nseb_purchased_posts`）は既存URL互換のため据え置き。
+- **根本原因（Codoc公式 cms-core.js v7.1.3 を取得・解析して確定）**：`.codoc-user` は `loginUser && cmsInfo.showLogin==1` だけで描画され**閲覧権と無関係**。これを購入済みの陽性シグナルにしていたため、Codocにログイン済みの期限切れ読者も「既読/読み放題」と誤表示されていた。閲覧権を表すのは `v-show="ownedEntry == false"` の `.codoc-buy-wrap` 非表示と `.codoc-entry-body-after` への本文流し込みのみ。**`.codoc-user` を閲覧権の判定に使わないこと。**
+- **期限切れ判定（note-style-engagement.php v4.14.0）**：ログイン済み（`.codoc-user`）＋購読プラン対象記事（`.codoc-subscription-title/.codoc-subscription-info` が描画）＋ロック中＋このブラウザに過去のサブスク利用形跡、の全条件で LocalStorage `codoc_subscription_expired=1` を立て `codoc_active_subscriber` を取り消す。記事ページ・マイ本棚に「⚠️ 月額サブスクの有効期限が切れています（要サブスク更新）」、一覧カードに「⚠️要サブスク更新」。アンロックを観測したら自動解除。購読プラン未紐付け記事（18項）ではプラン一覧が描画されないため誤判定しない。
+- **既知の限界**：単品購入記事は期限切れ中に一覧で「要サブスク更新」と出ることがある（記事を開きアンロックを確認すると解除）。本物の期限切れアカウントでの実機確認は未実施（模擬DOMテストのみ）。
+- **テスト**：`test_subscription_expired_display.py`（プラグインのインラインJSを抽出し、模擬Codocウィジェット各状態で22項目を検証。本番非接触）。
+
 ## 👑 順ちゃんAI（副社長エージェント）自律運用ルール
 本プロジェクトでは、Claude Code等は「現場作業員」として動作し、その上位に監視・指揮を行う「順ちゃんAI（副社長）」が常駐しているものとする。人間（社長）が離席・就寝中でも、下記の基準に従って作業を自律継続または安全に一時停止できることを目的とする。`junchan_agent.py`（プロジェクトルート直下に配置。標準ライブラリのみで動作し、外部依存なしでntfyトピック`junchan2026`（アラーム）／`junchan2026-ack`（ACK受付）を使う）がこの「緊急停止・待機」機構の実体。
 
