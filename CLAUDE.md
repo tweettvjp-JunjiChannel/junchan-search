@@ -199,6 +199,14 @@ content更新に限らずcategories等の更新だけでもCodoc側の購読プ�
 - **既知の限界**：単品購入記事も、購読が無効な間は一覧で「要サブスク更新」と出る（記事を開きアンロックを確認すると、そのページ表示中は解除）。本物のログイン済み読者アカウントのトークンでのAPI実応答（status:trueの形）は未確認で、本番検証はCodoc APIの応答をモックして実施した。本物の期限切れアカウントでの実機確認は未実施（模擬DOMテストのみ）。
 - **テスト**：`test_subscription_expired_display.py`（プラグインのインラインJSを抽出し、模擬Codocウィジェット各状態＋Codoc APIモックで30項目を検証。本番非接触）。
 
+## 20. マイ本棚（既読・スキ）のCodocアカウント同期（2026-10-13 追記：スマホでマイ本棚が「NOT FOUND」になる不具合を受けて）
+- **原因**：マイ本棚の「既読」（`nseb_purchased_posts`）・「スキ」（`nseb_liked_posts`）はブラウザのLocalStorageにしか無く、マイ本棚のURL（`?purchased_ids[]=…`）もそこから組み立てていたため、別端末では0件＝`post__in=[0]`となりCocoonの「NOT FOUND」になっていた。さらに0件時は`loop_start`が発火せずタブすら出ていなかった。
+- **設計**：Codocには外部サイトが読者データを保存する機能が無いため「アカウント確認はCodoc、保存はWordPress」に分担。`POST engage/v1/library`（note-style-engagement.php v4.16.0 `handle_library_sync`）に、ブラウザがCodocログイントークン（`codocTokenCode`）と端末側の履歴を送る→サーバーがCodoc API `/api/v1/paywall/tlWA9Gh9aA/users?paywall_token_code=…`でトークンを検証しCodocユーザーコードを取得（transientで10分キャッシュ、無効は60秒）→option `nseb_library_{ユーザーコード}`（autoload無効）に和集合マージで保存し結果を返す→ブラウザがLocalStorageへ書き戻し、マイ本棚表示中で中身が変わればIDを入れ直して開き直す（30秒に1回までのループ防止付き）。スキ解除・既読取り消しは和集合で復活しないよう`ops`（like/unlike/read/unread）として即時送信。Codoc未ログインの読者は従来どおりLocalStorageのみ（サーバーへは何も送らない）。
+- **管理者専用テスト経路**：アプリケーションパスワード認証の管理者に限り`test_user_code`（`test_`接頭辞必須）で本物のトークン無しに保存・マージを本番検証でき、`reset:1`で削除できる。本番E2E後は必ず`reset`で後始末すること。
+- **0件表示**：custom-search-filter.php v1.34.0で`loop_no_results`にも`render_my_library_tabs`を登録し、タブと「このタブにはまだ記事がありません（Codocにログインすると他端末の履歴も表示）」を出し、CSSで`.posts-not-found`を隠す。
+- **運用上の注意**：PCの既存履歴がクラウドへ送られるのは、そのPCのブラウザでCodocにログインした状態でサイトを1回開いたとき。本物の読者トークンでの`users` API実応答（`user.code`の有無）は未確認のため、`user.code`が無ければ`user.id`を使い、どちらも無ければ同期しない（安全側）。
+- **テスト**：`test_subscription_expired_display.py`（K/L/M：新規端末への同期・unlike送信・未ログイン時の非送信を含む37項目）。
+
 ## 👑 順ちゃんAI（副社長エージェント）自律運用ルール
 本プロジェクトでは、Claude Code等は「現場作業員」として動作し、その上位に監視・指揮を行う「順ちゃんAI（副社長）」が常駐しているものとする。人間（社長）が離席・就寝中でも、下記の基準に従って作業を自律継続または安全に一時停止できることを目的とする。`junchan_agent.py`（プロジェクトルート直下に配置。標準ライブラリのみで動作し、外部依存なしでntfyトピック`junchan2026`（アラーム）／`junchan2026-ack`（ACK受付）を使う）がこの「緊急停止・待機」機構の実体。
 

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Custom Search Category Filter
  * Description: 検索結果をカテゴリで絞り込むフィルタと、note記事のフルタイトル（カスタムフィールド note_full_title）を検索対象に含めるカスタムフィールド優先検索を提供する。
- * Version: 1.33.0
+ * Version: 1.34.0
  * Author: junchan-world
  */
 
@@ -122,6 +122,11 @@ class Custom_Search_Category_Filter {
         add_action('pre_get_posts', array($this, 'apply_sort_param'));
         add_action('pre_get_posts', array($this, 'filter_tag_by_category'));
         add_action('loop_start', array($this, 'render_my_library_tabs'));
+        // 【2026-10-13追記】マイ本棚が0件の場合、loop_startは発火せずタブすら
+        // 出力されないままCocoonの「NOT FOUND」だけが表示されていた（スマホ等、
+        // 履歴の無い端末で実機報告）。WP_Query::have_posts()が0件時に発火する
+        // loop_no_resultsでもタブと案内文を出力する。
+        add_action('loop_no_results', array($this, 'render_my_library_tabs'));
         add_action('loop_start', array($this, 'render_homepage_hero'));
         add_action('template_redirect', array($this, 'redirect_legacy_category_archive'));
         add_filter('posts_join', array($this, 'join_full_title_meta'), 10, 2);
@@ -426,6 +431,12 @@ class Custom_Search_Category_Filter {
   <a href="#" data-tab="liked" class="nseb-library-tab<?php echo $current_tab === 'liked' ? ' is-active' : ''; ?>">♥ スキした記事</a>
   <a href="#" data-tab="both" class="nseb-library-tab<?php echo $current_tab === 'both' ? ' is-active' : ''; ?>">🌟 サブスク既読記事＆スキ</a>
 </div>
+        <?php if ((int) $query->post_count === 0) : ?>
+<div class="nseb-library-empty" style="margin:0 0 2em;padding:1.2em;border:1px dashed #bbb;border-radius:10px;text-align:center;color:#555;line-height:1.8;">
+  <p style="margin:0 0 .4em;font-weight:bold;">📚 このタブにはまだ記事がありません</p>
+  <p style="margin:0;font-size:.92em;">記事を読んだり「スキ」をすると、ここに追加されます。<br>Codocにログインすると、パソコン・スマホなど他の端末で読んだ記事・スキした記事もここに表示されます（同期まで数秒かかる場合があります）。</p>
+</div>
+        <?php endif; ?>
         <?php
     }
 

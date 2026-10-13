@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.15.0
+ * Version: 4.16.0
  * Author: junchan-world
  */
 
@@ -280,6 +280,143 @@ class Note_Style_Engagement_Bar {
                 return current_user_can('manage_options');
             },
         ));
+        // 【2026-10-13追記：マイ本棚のCodocアカウント同期】詳細はhandle_library_syncを参照。
+        register_rest_route('engage/v1', '/library', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'handle_library_sync'),
+            'permission_callback' => '__return_true',
+        ));
+    }
+
+    // ===== 【2026-10-13追記：マイ本棚（既読・スキ）のCodocアカウント同期】 =====
+    // 以前はマイ本棚の「既読（nseb_purchased_posts）」「スキ（nseb_liked_posts）」が
+    // ブラウザのLocalStorageにしか無く、PCで読んだ/スキした記事がスマホでは一切
+    // 見えなかった（スマホでマイ本棚を開くと0件＝Cocoonの「NOT FOUND」になる）。
+    // Codoc自体には外部サイトが読者ごとのデータを保存する機能が無いため、
+    // 「Codocアカウントの確認はCodocに、データの保存はWordPressに」という分担にする：
+    //   1. ブラウザは、Codocログイン時に本サイトへ保存されるトークン（codocTokenCode）を
+    //      このエンドポイントへ送る（HTTPS・同一サイト。トークンはログに残さない）。
+    //   2. サーバーはCodoc API（/api/v1/paywall/{サイト運営者コード}/users?paywall_token_code=…。
+    //      cms-core.jsのfetchUserと同じAPI）でトークンを検証し、Codocのユーザーコードを得る。
+    //      検証結果はトークンのハッシュをキーに10分キャッシュ（Codocへの問い合わせを抑える）。
+    //   3. そのユーザーコードをキーに、WordPressのoption（autoload無効）へ既読・スキの
+    //      記事ID一覧を保存し、端末のLocalStorageと「和集合」でマージして返す。
+    //      明示的なスキ解除・既読取り消しは ops（{type:'unlike'|'unread'|'like'|'read', id}）
+    //      で送り、和集合マージで復活しないようにする。
+    // トークンを持たない（Codoc未ログインの）読者はこれまで通りLocalStorageのみで動く。
+    const CODOC_SITE_USER_CODE = 'tlWA9Gh9aA';
+    const LIBRARY_OPTION_PREFIX = 'nseb_library_';
+    const LIBRARY_MAX_IDS = 5000;
+
+    private function verify_codoc_token($token) {
+        $token = (string) $token;
+        if ($token === '' || strlen($token) > 256 || !preg_match('/^[A-Za-z0-9_\-\.]+$/', $token)) {
+            return null;
+        }
+        $cache_key = 'nseb_codoc_tok_' . md5($token);
+        $cached = get_transient($cache_key);
+        if ($cached !== false) {
+            return $cached === 'invalid' ? null : $cached;
+        }
+        $response = wp_remote_get(
+            'https://codoc.jp/api/v1/paywall/' . self::CODOC_SITE_USER_CODE . '/users?paywall_token_code=' . rawurlencode($token),
+            array('timeout' => 8)
+        );
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+            return null; // 通信失敗はキャッシュしない（次回再試行）
+        }
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $user = (is_array($body) && !empty($body['status']) && isset($body['user']) && is_array($body['user'])) ? $body['user'] : null;
+        $code = '';
+        if ($user) {
+            if (!empty($user['code'])) {
+                $code = (string) $user['code'];
+            } elseif (!empty($user['id'])) {
+                $code = 'id' . (string) $user['id'];
+            }
+        }
+        $code = preg_replace('/[^A-Za-z0-9_\-]/', '', $code);
+        if ($code === '') {
+            set_transient($cache_key, 'invalid', 60);
+            return null;
+        }
+        set_transient($cache_key, $code, 10 * MINUTE_IN_SECONDS);
+        return $code;
+    }
+
+    private function sanitize_id_list($list) {
+        if (!is_array($list)) {
+            return array();
+        }
+        $ids = array_values(array_unique(array_filter(array_map('absint', $list))));
+        return array_slice($ids, 0, self::LIBRARY_MAX_IDS);
+    }
+
+    public function handle_library_sync($request) {
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            $params = $request->get_params();
+        }
+
+        // 管理者専用のテスト経路：本物の読者トークン無しで保存・マージ処理を本番で
+        // E2E検証するため、管理者（アプリケーションパスワード認証）に限り
+        // 架空のユーザーコード（test_ 接頭辞必須）を直接指定できる。
+        $user_code = null;
+        if (!empty($params['test_user_code']) && current_user_can('manage_options')) {
+            $candidate = preg_replace('/[^A-Za-z0-9_\-]/', '', (string) $params['test_user_code']);
+            if (strpos($candidate, 'test_') === 0) {
+                $user_code = $candidate;
+            }
+        } else {
+            $user_code = $this->verify_codoc_token(isset($params['token']) ? $params['token'] : '');
+        }
+        if (!$user_code) {
+            return new WP_REST_Response(array('ok' => false, 'reason' => 'not_logged_in'), 401);
+        }
+
+        $option_key = self::LIBRARY_OPTION_PREFIX . $user_code;
+        if (!empty($params['reset']) && strpos($user_code, 'test_') === 0) {
+            delete_option($option_key);
+            return new WP_REST_Response(array('ok' => true, 'reset' => true), 200);
+        }
+
+        $stored = get_option($option_key, array());
+        $liked = $this->sanitize_id_list(isset($stored['liked']) ? $stored['liked'] : array());
+        $read = $this->sanitize_id_list(isset($stored['read']) ? $stored['read'] : array());
+
+        $liked = $this->sanitize_id_list(array_merge($liked, $this->sanitize_id_list(isset($params['liked']) ? $params['liked'] : array())));
+        $read = $this->sanitize_id_list(array_merge($read, $this->sanitize_id_list(isset($params['read']) ? $params['read'] : array())));
+
+        $ops = (isset($params['ops']) && is_array($params['ops'])) ? array_slice($params['ops'], 0, 200) : array();
+        foreach ($ops as $op) {
+            if (!is_array($op) || empty($op['type']) || empty($op['id'])) {
+                continue;
+            }
+            $id = absint($op['id']);
+            switch ($op['type']) {
+                case 'like':
+                    $liked = $this->sanitize_id_list(array_merge($liked, array($id)));
+                    break;
+                case 'unlike':
+                    $liked = array_values(array_diff($liked, array($id)));
+                    break;
+                case 'read':
+                    $read = $this->sanitize_id_list(array_merge($read, array($id)));
+                    break;
+                case 'unread':
+                    $read = array_values(array_diff($read, array($id)));
+                    break;
+            }
+        }
+
+        $new_value = array('liked' => $liked, 'read' => $read, 'updated_at' => time());
+        if (get_option($option_key, null) === null) {
+            add_option($option_key, $new_value, '', 'no');
+        } else {
+            update_option($option_key, $new_value, false);
+        }
+
+        return new WP_REST_Response(array('ok' => true, 'liked' => $liked, 'read' => $read), 200);
     }
 
     public function handle_backfill_pv_cache($request) {
@@ -584,6 +721,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
 #nseb-my-library-tabs{display:flex;flex-wrap:wrap;gap:.5em;justify-content:center;}
 .nseb-library-tab{display:inline-block;padding:.5em 1em;border-radius:999px;background:#f1f1f1;color:#555;text-decoration:none;font-size:.92em;font-weight:bold;white-space:nowrap;}
 .nseb-library-tab.is-active{background:#333;color:#fff;}
+.nseb-library-empty ~ .posts-not-found{display:none;}
 /* 【2026-09-14追記：購入復元ボタンの新設、2026-09-15追記：導線一本化、
    2026-09-16追記：UX再設計】Codocブロック直前に設置する統合案内ボックス。
    サブスク・単品購入の案内をサイドバーから全廃してこの1箇所へ集約した
@@ -856,8 +994,8 @@ button.nseb-card-badge:active{transform:scale(1.08);}
   function setLiked(postId, liked) {
     var set = getLikedSet();
     var idx = set.indexOf(postId);
-    if (liked && idx === -1) { set.push(postId); }
-    else if (!liked && idx !== -1) { set.splice(idx, 1); }
+    if (liked && idx === -1) { set.push(postId); queueLibraryOp('like', postId); }
+    else if (!liked && idx !== -1) { set.splice(idx, 1); queueLibraryOp('unlike', postId); }
     saveLikedSet(set);
   }
 
@@ -886,12 +1024,79 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     var changed = false;
     ids.forEach(function (id) {
       var idx = set.indexOf(id);
-      if (idx !== -1) { set.splice(idx, 1); changed = true; }
+      if (idx !== -1) { set.splice(idx, 1); changed = true; queueLibraryOp('unlike', id); }
     });
     if (changed) {
       saveLikedSet(set);
       console.warn('[nseb] スキ済みフラグとカウントの不整合(カウント0)を検知し自動補正しました: ids=' + ids.join(','));
     }
+  }
+
+  // 【2026-10-13追記：マイ本棚のCodocアカウント同期】既読・スキの履歴を、
+  // Codocにログインしている場合はサーバー（WordPress）にもCodocアカウント単位で
+  // 保存し、別端末（スマホ等）でも同じマイ本棚が見えるようにする。
+  // サーバー側の仕組み・安全性はPHPのhandle_library_syncのコメントを参照。
+  // 未ログイン（トークン無し）の読者はこれまで通りLocalStorageのみで動く。
+  var pendingLibraryOps = [];
+  var libraryOpTimer = null;
+  function postLibrary(payload) {
+    return fetch(restRoot + '/library?_=' + Date.now(), {
+      method: 'POST', cache: 'no-store', keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; });
+  }
+  // スキ・既読の変更は、和集合マージで復活しないよう「操作」として送る。
+  // 連続した操作は300msまとめてから1リクエストで送る。
+  function queueLibraryOp(type, postId) {
+    if (!getCodocToken()) { return; }
+    pendingLibraryOps.push({ type: type, id: postId });
+    if (libraryOpTimer) { return; }
+    libraryOpTimer = window.setTimeout(function () {
+      libraryOpTimer = null;
+      var ops = pendingLibraryOps.splice(0, pendingLibraryOps.length);
+      var token = getCodocToken();
+      if (!ops.length || !token) { return; }
+      postLibrary({ token: token, ops: ops });
+    }, 300);
+  }
+  function sameIdSet(a, b) {
+    if (a.length !== b.length) { return false; }
+    var sa = a.slice().sort(), sb = b.slice().sort();
+    for (var i = 0; i < sa.length; i++) { if (sa[i] !== sb[i]) { return false; } }
+    return true;
+  }
+  // ページ表示のたびに1回、端末側の履歴をサーバーへ送り、サーバー側と和集合で
+  // マージした結果を端末側へ書き戻す。マイ本棚を表示中で中身が変わった場合は、
+  // 新しい記事ID一覧でマイ本棚を開き直す（一覧の絞り込みはURLのIDで行うため）。
+  function syncLibraryWithCloud() {
+    var token = getCodocToken();
+    if (!token || !restRoot) { return; }
+    var beforeLiked = getLikedSet(), beforeRead = getPurchasedSet();
+    postLibrary({ token: token, liked: beforeLiked, read: beforeRead }).then(function (res) {
+      if (!res || !res.ok) { return; }
+      var liked = (res.liked || []).map(Number), read = (res.read || []).map(Number);
+      var changed = !sameIdSet(liked, beforeLiked) || !sameIdSet(read, beforeRead);
+      if (!changed) { return; }
+      saveLikedSet(liked);
+      savePurchasedSet(read);
+      wireMyLibraryLinks();
+      if (accountStateRerenderers.cards) { accountStateRerenderers.cards(); }
+      if (accountStateRerenderers.statusBar) { accountStateRerenderers.statusBar(); }
+      var params = new URLSearchParams(window.location.search);
+      if (params.get('view') === 'my-library') {
+        // LocalStorageへの書き込みが失敗する環境等で開き直しが無限に
+        // 繰り返されないよう、30秒に1回までに制限する。
+        var guardKey = 'nseb_library_reload_at';
+        var last = 0;
+        try { last = parseInt(window.sessionStorage.getItem(guardKey) || '0', 10); } catch (e) {}
+        if (Date.now() - last < 30000) { return; }
+        try { window.sessionStorage.setItem(guardKey, String(Date.now())); } catch (e) {}
+        var tab = params.get('tab') || 'purchased';
+        window.location.replace(buildMyLibraryUrl(tab));
+      }
+    });
   }
 
   function getPurchasedSet() {
@@ -914,6 +1119,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     if (idx !== -1) {
       set.splice(idx, 1);
       savePurchasedSet(set);
+      queueLibraryOp('unread', postId);
     }
   }
   // 【2026-09-01追記：記事個別のCodocウィジェット直接観測結果】
@@ -943,6 +1149,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     if (set.indexOf(postId) === -1) {
       set.push(postId);
       savePurchasedSet(set);
+      queueLibraryOp('read', postId);
     }
   }
   // 【2026-08-25 修正】「スキ」のeffectiveLikedと同じ「count<=0なら赤点灯させない」
@@ -2082,8 +2289,10 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     applyRelatedEntriesContextOverride();
     accountStateRerenderers.libraryNotice = initMyLibraryExpiredNotice;
     accountStateRerenderers.detailNotice = syncDetailExpiredNotice;
-    // 【2026-10-13追記】端末に依存しない、Codocアカウント単位の購読状態照会。
+    // 【2026-10-13追記】端末に依存しない、Codocアカウント単位の購読状態照会と、
+    // マイ本棚（既読・スキ）のCodocアカウント同期。
     syncCodocAccountState();
+    syncLibraryWithCloud();
   }
   // 【2026-09-02追記：PJAX対応】custom-search-filter.phpのPJAX（#mainのみを
   // fetch()で差し替える非同期部分更新）は、通常のDOMContentLoaded/pageshowを

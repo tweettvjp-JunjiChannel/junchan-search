@@ -16,7 +16,7 @@ js = js.replace("<?php echo wp_json_encode(self::CONTENT_SUBSCRIPTION_DOM_ID); ?
 assert "<?php" not in js, "未置換のPHPタグがあります"
 
 PAID = {"purchased_count": 0, "price_label": "¥300", "is_free": False, "view_count": 5,
-        "like_count": 0, "view_today": 0, "view_week": 0, "view_month": 0}
+        "like_count": 1, "view_today": 0, "view_week": 0, "view_month": 0}
 PAID_100 = dict(PAID, price=100, price_label="100円")
 FREE = dict(PAID, price=0, price_label="無料", is_free=True, purchased_count=None)
 FREE_IDS = {"900"}
@@ -67,19 +67,42 @@ def check(name, cond, detail=""):
     print(("✅ 合格" if cond else "❌ 不合格"), name, detail)
 
 
-def run(ctx, html, storage, codoc=None):
+# マイ本棚クラウド同期のサーバー（/engage/v1/library）モック。PCで保存済みの履歴を想定。
+CLOUD = {"liked": [], "read": []}
+LIBRARY_REQUESTS = []
+
+
+def run(ctx, html, storage, codoc=None, path="/page", cloud=None):
     """codoc: None=Codoc未ログイン(トークン無し) / 'active'=購読中 / 'inactive'=ログイン中だが購読無効 /
     'invalid'=トークン失効。Codoc APIはモックで応答する（本番非接触）。"""
     page = ctx.new_page()
+    CLOUD.update(cloud or {"liked": [], "read": []})
 
     def handler(route):
         url = route.request.url
         if "/card-data" in url:
             ids = re.search(r"ids=([0-9,]+)", url).group(1).split(",")
             route.fulfill(status=200, content_type="application/json", body=json.dumps({i: (FREE if i in FREE_IDS else PAID_100 if i in CHEAP_IDS else PAID) for i in ids}))
+        elif "/engage/v1/library" in url:
+            req = json.loads(route.request.post_data or "{}")
+            LIBRARY_REQUESTS.append(req)
+            if not req.get("token"):
+                route.fulfill(status=401, content_type="application/json", body='{"ok":false}')
+                return
+            for k_req, k in (("liked", "liked"), ("read", "read")):
+                CLOUD[k] = sorted(set(CLOUD[k]) | set(req.get(k_req, [])))
+            for op in req.get("ops", []):
+                key = "liked" if op["type"] in ("like", "unlike") else "read"
+                if op["type"] in ("like", "read"):
+                    CLOUD[key] = sorted(set(CLOUD[key]) | {op["id"]})
+                else:
+                    CLOUD[key] = [i for i in CLOUD[key] if i != op["id"]]
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True, **CLOUD}))
+        elif "/like/" in url:
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"like_count": 1}))
         elif "/view/" in url:
             route.fulfill(status=200, content_type="application/json", body=json.dumps(PAID))
-        elif url.startswith("http://test.local/page"):
+        elif url.startswith("http://test.local/page") or url.startswith("http://test.local/?view=my-library"):
             route.fulfill(status=200, content_type="text/html; charset=utf-8", body=html)
         else:
             route.fulfill(status=200, body="[]", content_type="application/json")
@@ -102,7 +125,7 @@ def run(ctx, html, storage, codoc=None):
     if codoc:
         st["codocTokenCode"] = "tok-" + codoc
     page.evaluate("s => { localStorage.clear(); sessionStorage.clear(); for (const k in s) localStorage.setItem(k, s[k]); }", st)
-    page.goto("http://test.local/page")
+    page.goto("http://test.local" + path)
     page.wait_for_timeout(1000)
     return page
 
@@ -192,6 +215,35 @@ with sync_playwright() as pw:
     check("J1 トークン失効で期限切れフラグ解除", ls(p, "codoc_subscription_expired") is None)
     check("J2 一覧に期限切れバッジが残らない", p.locator(".nseb-card-purchased.is-expired").count() == 0)
     check("J3 マイ本棚の案内も消える", p.locator(".nseb-library-expired-notice").count() == 0)
+    p.close()
+
+    # K: スマホ（新規ブラウザ・履歴ゼロ）でCodocログイン → PCで保存済みの既読/スキがマイ本棚に同期される
+    LIBRARY_REQUESTS.clear()
+    p = run(ctx, library_page([]), {}, codoc="active", path="/?view=my-library&tab=purchased",
+            cloud={"liked": [101], "read": [102, 500]})
+    p.wait_for_timeout(1500)
+    check("K1 クラウドからスキ履歴を取得", json.loads(ls(p, "nseb_liked_posts") or "[]") == [101], ls(p, "nseb_liked_posts"))
+    check("K2 クラウドから既読履歴を取得", sorted(json.loads(ls(p, "nseb_purchased_posts") or "[]")) == [102, 500], ls(p, "nseb_purchased_posts"))
+    check("K3 マイ本棚が同期後のIDで開き直される", "purchased_ids" in p.url and "102" in p.url and "500" in p.url, p.url)
+    check("K4 トークンをサーバーへ送っている", any(r.get("token") == "tok-active" for r in LIBRARY_REQUESTS))
+    p.close()
+
+    # L: ログイン中にスキを解除 → 『unlike』操作がサーバーへ送られ、和集合マージで復活しない
+    LIBRARY_REQUESTS.clear()
+    p = run(ctx, detail_page(101, codoc_block(True, False, True)), {"nseb_liked_posts": "[101]"}, codoc="active",
+            cloud={"liked": [101], "read": []})
+    p.click(".nseb-like-btn")
+    p.wait_for_timeout(1200)
+    ops = [op for r in LIBRARY_REQUESTS for op in r.get("ops", [])]
+    check("L1 スキ解除がunlike操作として送信", {"type": "unlike", "id": 101} in ops, str(ops))
+    check("L2 クラウド側からも101のスキが消える", 101 not in CLOUD["liked"], str(CLOUD["liked"]))
+    p.close()
+
+    # M: 未ログイン（トークン無し）ではサーバーへ一切送らない（従来どおり端末内のみ）
+    LIBRARY_REQUESTS.clear()
+    p = run(ctx, library_page([101]), {"nseb_purchased_posts": "[101]"})
+    p.wait_for_timeout(800)
+    check("M1 未ログインでは同期リクエストなし", len(LIBRARY_REQUESTS) == 0, str(len(LIBRARY_REQUESTS)))
     p.close()
 
     browser.close()
