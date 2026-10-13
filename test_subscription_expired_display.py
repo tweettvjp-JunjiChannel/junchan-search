@@ -17,6 +17,10 @@ assert "<?php" not in js, "未置換のPHPタグがあります"
 
 PAID = {"purchased_count": 0, "price_label": "¥300", "is_free": False, "view_count": 5,
         "like_count": 0, "view_today": 0, "view_week": 0, "view_month": 0}
+PAID_100 = dict(PAID, price=100, price_label="100円")
+FREE = dict(PAID, price=0, price_label="無料", is_free=True, purchased_count=None)
+FREE_IDS = {"900"}
+CHEAP_IDS = {"500"}
 
 
 def codoc_block(logged_in, locked, offers_sub):
@@ -71,7 +75,7 @@ def run(ctx, html, storage):
         url = route.request.url
         if "/card-data" in url:
             ids = re.search(r"ids=([0-9,]+)", url).group(1).split(",")
-            route.fulfill(status=200, content_type="application/json", body=json.dumps({i: PAID for i in ids}))
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({i: (FREE if i in FREE_IDS else PAID_100 if i in CHEAP_IDS else PAID) for i in ids}))
         elif "/view/" in url:
             route.fulfill(status=200, content_type="application/json", body=json.dumps(PAID))
         elif url.startswith("http://test.local/page"):
@@ -145,14 +149,16 @@ with sync_playwright() as pw:
     p.close()
 
     # G: マイ本棚＋一覧カード（期限切れ状態）
-    p = run(ctx, library_page([101, 102, 500]),
+    p = run(ctx, library_page([101, 102, 500, 900]),
             {"codoc_subscription_expired": "1", "nseb_purchased_posts": "[101,102]"})
     p.wait_for_selector("#post-101 .nseb-card-purchased")
     check("G1 マイ本棚に期限切れ案内", p.locator(".nseb-library-expired-notice").count() == 1)
     b101 = p.inner_text("#post-101 .nseb-card-purchased")
     check("G2 既読記事カードが『要サブスク更新』", "要サブスク更新" in b101, b101)
-    check("G3 未読記事(500)には期限切れバッジを出さない",
-          p.locator("#post-500 .is-expired").count() == 0)
+    b500 = p.inner_text("#post-500 .nseb-card-purchased") if p.locator("#post-500 .nseb-card-purchased").count() else ""
+    check("G3 未読の100円記事(500)にも『要サブスク更新』", "要サブスク更新" in b500, b500)
+    check("G4 無料記事(900)には期限切れバッジを出さない",
+          p.locator("#post-900 .is-expired").count() == 0)
     p.close()
 
     # H: マイ本棚＋一覧カード（通常の既読、期限切れでない）

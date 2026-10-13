@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Note Style Engagement Bar
  * Description: 記事タイトル直下にnote風ステータスバー（価格・PV・スキ・購入数）を表示し、記事内の赤い案内枠にサブスクリプション登録ボタンを追加する。
- * Version: 4.14.0
+ * Version: 4.14.1
  * Author: junchan-world
  */
 
@@ -879,14 +879,20 @@ button.nseb-card-badge:active{transform:scale(1.08);}
     return isPurchased(postId) || subscriberAppliesTo(postId);
   }
   // 【2026-10-13追記】この記事について「サブスク期限切れ（要更新）」を表示
-  // すべきか。サブスク期限切れフラグが立っており、かつ (a) このブラウザで過去に
-  // 既読（アンロック）済みの記事か、(b) 今まさにこの詳細ページでロックを
-  // 直接観測した記事、のいずれか。このセッションで実際にアンロックを確認
-  // できた記事（単品購入済み等）は期限切れ扱いにしない。
+  // すべきか。このセッションで実際にアンロックを確認できた記事（単品購入済み等）
+  // は期限切れ扱いにしない。
+  // 【同日修正：既読履歴への依存を撤廃】当初は「既読履歴(isPurchased)にある記事」
+  // か「今この詳細ページでロックを観測した記事」に限定していたため、未読の
+  // 有料記事（実例：10/12の100円記事）は一覧で「要サブスク更新」が出ず、
+  // 既読の300円記事にだけ出るという不整合が実機で報告された（価格による
+  // 分岐ではなく、たまたま300円記事だけが既読履歴に入っていた）。サブスクは
+  // 全有料記事を対象とする設計（section 18で紐付けを全件維持）のため、
+  // 期限切れ状態ではすべての有料記事に一貫して表示する。有料記事かどうかの
+  // 判定は呼び出し側（computeAccessBadgeStateのpurchasedCount!==null、
+  // 一覧カードではさらに!d.is_free、詳細ページではdata-paid）に委ねる。
   function expiredAppliesTo(postId) {
     if (!isSubscriptionExpired()) { return false; }
-    if (codocLiveVerdict[postId] === true) { return false; }
-    return isPurchased(postId) || codocLiveVerdict[postId] === false;
+    return codocLiveVerdict[postId] !== true;
   }
 
   // 【2026-08-26 追記：購入済みバッジの表示ロジックを一本化】以前は「色だけ
@@ -1805,7 +1811,7 @@ button.nseb-card-badge:active{transform:scale(1.08);}
       // 【2026-08-28修正】アクセス状態バッジ（購入済み/読み放題/購入者数）は
       // 価格バッジの直前に表示する（元の価格は消さずそのまま併記する仕様。
       // computeAccessBadgeStateのコメント参照）。
-      var accessState = computeAccessBadgeState(d.purchased_count, isPurchased(numericId), subscriberAppliesTo(numericId), expiredAppliesTo(numericId));
+      var accessState = computeAccessBadgeState(d.purchased_count, isPurchased(numericId), subscriberAppliesTo(numericId), !d.is_free && expiredAppliesTo(numericId));
       if (accessState.show) {
         var accessBadge = document.createElement('span');
         var accessLabel;
