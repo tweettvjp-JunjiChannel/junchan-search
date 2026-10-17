@@ -1145,13 +1145,18 @@ def sync_new_note_posts(
                                 log_row("new_note", post_id, slug, a["title"], "codoc_link_skipped_no_entry_code")
                             )
 
+                    thumbnail_url = ""
                     if a["thumbnail"]:
                         media_id = wp.upload_media_from_url(a["thumbnail"], f"{a['key']}-thumb.jpg")
                         if media_id:
                             wp.update_post(post_id, {"featured_media": media_id})
+                            thumbnail_url = a["thumbnail"]
 
                     new_hash = body_hash(body_html)
                     state.setdefault("note", {})[a["key"]] = {"body_hash": new_hash, "price": a["price"]}
+                    if thumbnail_url:
+                        # 更新追従（sync_note_updates）でアイキャッチ差し替えの要否を判定する基準値
+                        state["note"][a["key"]]["thumbnail_url"] = thumbnail_url
 
                     print(f"    [OK] post_id={post_id}")
                     log_rows.append(log_row("new_note", post_id, slug, title, "success", f"body_hash={new_hash[:12]}"))
@@ -1390,13 +1395,30 @@ def sync_note_updates(
                     new_hash = body_hash(change_signature)
                     old_hash = note_state.get(key, {}).get("content_hash")
                     forced = key in force_keys
+                    # 【2026-10-18追記：アイキャッチ画像の差し替え漏れの修正】
+                    # 従来この更新経路はfeatured_mediaに一切触れておらず、note側でヘッダー
+                    # 画像だけを差し替えても（例: n488640bb2088）WordPress側は新規投稿時の
+                    # 古い画像のまま残っていた。前回反映したnote側画像URLをstateに記録し、
+                    # URLが変わっていれば差し替える。記録の無い過去記事は、通常の差分同期で
+                    # 全件を一斉に再アップロードしないよう、初回は現在のURLを基準値として
+                    # 記録するだけにする（強制指定の記事は記録の有無にかかわらず必ず取り直す）。
+                    recorded_thumb = note_state.get(key, {}).get("thumbnail_url")
+                    current_thumb = a.get("thumbnail") or ""
+                    thumb_changed = bool(current_thumb) and recorded_thumb is not None and recorded_thumb != current_thumb
 
-                    if old_hash == new_hash and not forced:
+                    if old_hash == new_hash and not forced and not thumb_changed:
+                        if execute and recorded_thumb is None and current_thumb and key in note_state:
+                            note_state[key]["thumbnail_url"] = current_thumb
                         print("    変更なし")
                         time.sleep(REQUEST_DELAY_SECONDS)
                         continue
 
-                    print("    [強制更新]" if forced and old_hash == new_hash else "    [変更を検出]")
+                    if forced and old_hash == new_hash:
+                        print("    [強制更新]")
+                    elif old_hash == new_hash:
+                        print("    [アイキャッチ画像の変更を検出]")
+                    else:
+                        print("    [変更を検出]")
                     if not execute:
                         log_rows.append(log_row("update_note", post["id"], slug, a["title"], "dry_run_would_update"))
                         time.sleep(REQUEST_DELAY_SECONDS)
@@ -1450,8 +1472,24 @@ def sync_note_updates(
                     tag_ids = [t for t in tag_ids if t]
                     update_payload["tags"] = tag_ids
 
+                    # アイキャッチの差し替えも同じ更新リクエストに載せる（この後のCodoc再紐付けより
+                    # 前に済ませておかないと、featured_mediaの更新で紐付けが外れる恐れがあるため）。
+                    # アップロードに失敗した場合は既存の画像を残し、次回の強制同期で取り直せるよう
+                    # 基準値は更新しない。
+                    thumbnail_url = recorded_thumb
+                    if current_thumb and (forced or thumb_changed or recorded_thumb is None):
+                        media_id = wp.upload_media_from_url(current_thumb, f"{key}-thumb.jpg")
+                        if media_id:
+                            update_payload["featured_media"] = media_id
+                            thumbnail_url = current_thumb
+                            print(f"    [アイキャッチ] 最新のnote画像に差し替えます（media_id={media_id}）")
+                        else:
+                            print("    [警告] アイキャッチ画像のアップロードに失敗したため、既存の画像を維持します")
+
                     wp.update_post(post["id"], update_payload)
                     note_state[key] = {"content_hash": new_hash, "price": existing_price}
+                    if thumbnail_url:
+                        note_state[key]["thumbnail_url"] = thumbnail_url
                     print(f"    [OK] post_id={post['id']} を更新しました")
                     log_rows.append(log_row("update_note", post["id"], slug, a["title"], "success"))
 
