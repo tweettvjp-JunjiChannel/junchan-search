@@ -20,6 +20,8 @@ if not exist "update_notelist.txt" (
     exit /b 1
 )
 
+REM Pythonの出力はUTF-8のため、文字化け（「□グイン」等）を防ぐようコンソールをUTF-8に切り替える
+chcp 65001 > nul
 python sync_updated_notes.py --execute --list-file update_notelist.txt
 
 echo.

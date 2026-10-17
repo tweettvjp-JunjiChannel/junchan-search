@@ -10,6 +10,8 @@ cd /d "%~dp0"
 if exist "venv\Scripts\activate.bat" call "venv\Scripts\activate.bat"
 if exist ".venv\Scripts\activate.bat" call ".venv\Scripts\activate.bat"
 
+REM Pythonの出力はUTF-8のため、文字化け（「□グイン」等）を防ぐようコンソールをUTF-8に切り替える
+chcp 65001 > nul
 python codoc_reauth.py
 
 echo.

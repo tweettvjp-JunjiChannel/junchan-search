@@ -33,9 +33,17 @@ import auto_sync_blogs as core
 CHECK_URL = "https://codoc.jp/me/entries"
 
 
-def is_logged_in(page) -> bool:
-    page.goto(CHECK_URL, wait_until="load", timeout=30000)
-    page.wait_for_timeout(1500)
+def is_logged_in(page) -> bool | None:
+    """ログイン済みならTrue、未ログインならFalse、通信エラー等で判定できなければNone。"""
+    try:
+        # wait_until="load" は画像・外部スクリプト等の読み込み完了まで待つため、
+        # 実機で30秒タイムアウトが発生した。ログイン判定に必要なのはリダイレクト後の
+        # URLだけなので、HTML本体が届いた時点（domcontentloaded）で十分。
+        page.goto(CHECK_URL, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(1500)
+    except Exception as e:
+        print(f"\n[通信エラー] Codocのページを開けませんでした: {str(e).splitlines()[0]}")
+        return None
     return "/login" not in page.url and "/two_factor" not in page.url
 
 
@@ -51,6 +59,9 @@ def main() -> None:
                 print("現在はCodocにログイン済みです。")
                 print("30日間の信頼期間を更新し直す場合は、開いたブラウザ右上のメニューから")
                 print("一度ログアウトし、もう一度ログインしてください。")
+            elif already is None:
+                print("ログイン状態を確認できませんでした（通信エラー）。")
+                print(f"開いたブラウザで {CHECK_URL} を開き直し、ログインしてください。")
             else:
                 print("Codocのログインが切れています。開いたブラウザでログインしてください。")
             print()
@@ -62,12 +73,19 @@ def main() -> None:
             print()
             input("ログインが終わったら Enter を押してください...")
 
-            if is_logged_in(page):
-                print("\n[OK] Codocへのログインを確認しました。以後30日間は自動化がそのまま動きます。")
-            else:
-                print(f"\n[エラー] まだログインできていません（現在のURL: {page.url}）。")
-                print("もう一度このスクリプトを実行してやり直してください。")
-                sys.exit(1)
+            # 通信エラーやログイン未完了でも落とさず、Enterで何度でも確認し直せるようにする
+            while True:
+                result = is_logged_in(page)
+                if result:
+                    print("\n[OK] Codocへのログインを確認しました。以後30日間は自動化がそのまま動きます。")
+                    return
+                if result is False:
+                    print(f"\n[未完了] まだログインできていません（現在のURL: {page.url}）。")
+                    print("ブラウザでログインと認証コード入力を済ませてください。")
+                answer = input("Enter で再確認 / q + Enter で終了: ").strip().lower()
+                if answer == "q":
+                    print("確認を中断しました。もう一度このスクリプトを実行してやり直してください。")
+                    sys.exit(1)
         finally:
             context.close()
 
