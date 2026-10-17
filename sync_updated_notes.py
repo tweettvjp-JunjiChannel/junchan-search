@@ -58,12 +58,28 @@ auto_sync_blogs.sync_note_updates() と同じく、本文HTMLを実際に取得�
 デスクトップ等から実行する場合は「全件差分同期.bat」を使用する
 （夜間放置向け。バッチ分割ループを内蔵しているため、これ単体で
 最後まで自動的に完走する）。
+
+【2026-10-18追記：リストファイルによるピンポイント強制同期（--list-file）】
+特定のnote記事だけを即座にWordPressへ反映したい場合のための運用モード。
+テキストファイル（1行に1つnote記事のURL。空行・"#"始まりのコメント行は
+無視。URLの代わりに記事キー "n..." を直接書いても可）を読み込み、
+- 本文ハッシュによる差分判定・公開日ウィンドウを一切スキップし、
+- WordPress側にスラッグ（=記事キー）で既に存在する記事は強制上書き更新
+  （sync_note_updates の force_keys 経由）、
+- 存在しない記事は新規投稿（sync_new_note_posts 経由）
+する。新規・更新とも既存の通常経路の関数をそのまま呼ぶため、赤枠＋青枠、
+Codoc価格維持・購読プラン紐付け、カテゴリー自己修復、タグ同期といった
+既存の仕様はすべてそのまま適用される。
+    python sync_updated_notes.py --list-file update_notelist.txt            # ドライラン
+    python sync_updated_notes.py --execute --list-file update_notelist.txt  # 本番実行
+デスクトップ等から実行する場合は「個別変更リスト.bat」を使用する。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -85,20 +101,85 @@ def save_checked_keys(keys: set[str]) -> None:
     PROGRESS_PATH.write_text(json.dumps(sorted(keys), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+NOTE_KEY_PATTERN = re.compile(r"(?:/n/|^)(n[0-9a-zA-Z]+)(?:[/?#]|$)")
+
+
+def load_list_file_keys(path: Path) -> list[str]:
+    """リストファイルからnote記事キーを順序を保ったまま重複なく取り出す。"""
+    keys: list[str] = []
+    # メモ帳で保存されたBOM付きUTF-8でも先頭行のキーが崩れないよう utf-8-sig で読む
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = NOTE_KEY_PATTERN.search(line)
+        if not m:
+            print(f"  [警告] {path.name} {lineno}行目: note記事のURLとして解釈できないためスキップします: {line}")
+            continue
+        if m.group(1) not in keys:
+            keys.append(m.group(1))
+    return keys
+
+
+def run_list_file_mode(wp, state: dict, creds: dict, list_path: Path, execute: bool, link_maps) -> None:
+    keys = load_list_file_keys(list_path)
+    print(f"リストファイル {list_path.name} から{len(keys)}件の記事を読み込みました")
+    if not keys:
+        print("対象記事はありませんでした（リストファイルにURLを1行に1つ記入してください）。")
+        return
+
+    articles_by_key = {a["key"]: a for a in core.fetch_note_article_list()}
+    targets = []
+    log_rows: list[dict] = []
+    for key in keys:
+        if key in articles_by_key:
+            targets.append(articles_by_key[key])
+        else:
+            # 公開一覧APIに無い記事（下書き・削除済み・別アカウントの記事・URLの誤記）は
+            # 本文も価格情報も取れないため同期できない
+            print(f"  [警告] {key} はnote.comの公開済み記事一覧に見つからないためスキップします")
+            log_rows.append(core.log_row("list_sync", None, key, "", "not_found_on_note"))
+
+    # 先にWP側の存在有無で振り分ける。sync_new_note_posts で作成した直後の記事を
+    # sync_note_updates に渡すと、同じ記事を二重に書き込んでしまうため。
+    existing = [a for a in targets if wp.find_post_by_slug(a["key"]) is not None]
+    missing = [a for a in targets if a not in existing]
+    print(f"WordPressに既存: {len(existing)}件（強制上書き更新） / 未投稿: {len(missing)}件（新規投稿）")
+
+    if missing:
+        log_rows += core.sync_new_note_posts(wp, missing, state, execute, None, link_maps)
+        core.save_state(state)
+    if existing:
+        # force_keys に全件を渡すことで、公開日ウィンドウと本文ハッシュ判定の両方を無視させる
+        log_rows += core.sync_note_updates(
+            wp, existing, state, execute, None, link_maps,
+            force_keys={a["key"] for a in existing},
+        )
+        core.save_state(state)
+
+    core.relink_touched_posts(wp, log_rows, execute)
+    if execute and any(r["result"] == "success" for r in log_rows):
+        core.regenerate_tag_index_page(wp, creds)
+    report_result(log_rows, execute)
+
+
 def report_result(log_rows: list[dict], execute: bool) -> None:
     core.append_log(log_rows)
     # sync_note_updates() は実際に更新した記事を result="success"、
     # ドライランで更新見込みと判定した記事を result="dry_run_would_update"
     # として log_rows に積む（変更なしの記事はそもそもログに積まれない）。
-    updated = [r for r in log_rows if r["result"] in ("success", "dry_run_would_update")]
+    # --list-file モードでは sync_new_note_posts の新規作成分
+    # （task="new_note"、ドライラン時は "dry_run_would_create"）も混ざる。
+    updated = [r for r in log_rows if r["result"] in ("success", "dry_run_would_update", "dry_run_would_create")]
 
     print("\n" + "=" * 60)
     print("差分検知・更新の結果")
     print("=" * 60)
     if updated:
-        print(f"更新{'された' if execute else '見込みの'}記事: {len(updated)}件")
+        print(f"反映{'された' if execute else '見込みの'}記事: {len(updated)}件")
         for r in updated:
-            print(f"  - {r['title']}")
+            kind = "新規" if r["task"] == "new_note" else "更新"
+            print(f"  - [{kind}] {r['title']}")
     else:
         print("更新対象の記事はありませんでした（差分なし）。")
 
@@ -129,14 +210,35 @@ def main() -> None:
              "バッチファイル側で本プロセスごと繰り返し起動する運用を想定）。"
              "終了コード: 0=今回のサイクルで全件確認完了、2=まだ未確認の記事が残っている。",
     )
+    parser.add_argument(
+        "--list-file", type=Path, default=None,
+        help="note記事のURLを1行に1つ記載したテキストファイル。指定すると差分判定をスキップし、"
+             "記載された記事だけをWordPressへ強制同期する（既存は上書き更新、未投稿は新規投稿）。",
+    )
     args = parser.parse_args()
 
     creds = core.load_credentials()
     wp = core.WP(creds["site_url"], creds["username"], creds["application_password"])
     state = core.load_state()
 
-    is_full_scan = args.recent_days is None
     mode = "本番実行（--execute）" if args.execute else "ドライラン（変更なし）"
+
+    if args.list_file:
+        list_path = args.list_file
+        if not list_path.is_absolute() and not list_path.exists():
+            list_path = SCRIPT_DIR / list_path
+        if not list_path.exists():
+            print(f"[エラー] リストファイルが見つかりません: {list_path}")
+            sys.exit(1)
+        print("=" * 60)
+        print(f"note記事 個別強制同期（リストファイル指定）  実行モード: {mode}")
+        print("=" * 60)
+        link_maps = core.fetch_link_maps(wp)
+        print(f"内部リンク変換用の対応表を取得しました: note {len(link_maps[0])}件 / exblog {len(link_maps[1])}件")
+        run_list_file_mode(wp, state, creds, list_path, args.execute, link_maps)
+        return
+
+    is_full_scan = args.recent_days is None
     scope = "全note記事（約360件）" if is_full_scan else f"直近{args.recent_days}日以内の記事"
     print("=" * 60)
     print(f"note過去記事 差分自動検知・更新  実行モード: {mode}")
