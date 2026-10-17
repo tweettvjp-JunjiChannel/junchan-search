@@ -1311,12 +1311,18 @@ def sync_note_updates(
     # 「直近4ヶ月」等、週次の既定値（NOTE_UPDATE_WINDOW_DAYS=30日）より広い
     # ウィンドウで呼び出せるようにパラメータ化した。省略時は従来通り既定値を使う。
     window_days = NOTE_UPDATE_WINDOW_DAYS if window_days is None else window_days
+    force_keys = force_keys or set()
+    # 【2026-10-18追記】sync_updated_notes.py --list-file のように渡された記事が
+    # すべて強制指定の場合は、公開日ウィンドウが一切効かないため見出しを切り替える
+    # （--key 指定時は通常の更新追従と混在するので従来の見出しのまま）。
+    all_forced = bool(force_keys) and all(a["key"] in force_keys for a in articles)
 
     print("\n" + "=" * 60)
-    print(f"【3】note記事の更新追従（公開から{window_days}日以内）")
+    if all_forced:
+        print("【3】note記事の強制上書き更新（リスト指定・公開日/差分判定なし）")
+    else:
+        print(f"【3】note記事の更新追従（公開から{window_days}日以内）")
     print("=" * 60)
-
-    force_keys = force_keys or set()
 
     now = datetime.now()
     recent = []
@@ -1334,8 +1340,11 @@ def sync_note_updates(
             continue
         if (now - pub_dt).days <= window_days:
             recent.append(a)
-    print(f"公開から{window_days}日以内のnote記事: {len(recent)}件"
-          + (f"（うち強制指定: {len(force_keys)}件）" if force_keys else ""))
+    if all_forced:
+        print(f"強制上書き対象のnote記事: {len(recent)}件")
+    else:
+        print(f"公開から{window_days}日以内のnote記事: {len(recent)}件"
+              + (f"（うち強制指定: {len(force_keys)}件）" if force_keys else ""))
 
     if limit:
         recent = recent[:limit]
