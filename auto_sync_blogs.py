@@ -324,6 +324,61 @@ class WP:
         )
         return r.json()
 
+    def delete_replaced_featured_media(self, old_media_id: int, new_media_id: int, note_key: str) -> str:
+        """
+        アイキャッチを差し替えた後、不要になった旧画像をメディアライブラリから完全削除する
+        （2026-10-18追記）。誤削除を防ぐため、以下をすべて満たす場合のみ削除する。
+        (1) 自動同期がこの記事用にアップロードした画像（ファイル名が "{note_key}-thumb" 始まり）。
+            手動で設定した画像には触れない。
+        (2) どの投稿・固定ページの本文からも参照されていない。内部リンクカード
+            （internal_article_links.build_article_card_html）はリンク先記事のアイキャッチURLを
+            他記事の本文へ静的HTMLとして埋め込むため、削除するとそのカードの画像が切れる。
+            WordPressが生成するサイズ違い（-300x169.jpg 等）の参照も対象に含める。
+        戻り値は結果を表す短い文字列（ログ用）。
+        """
+        if not old_media_id or old_media_id == new_media_id:
+            return "skipped_no_old_media"
+        r = self._request(
+            "GET", f"{self.site_url}/wp-json/wp/v2/media/{old_media_id}",
+            params={"context": "edit"}, raise_for_status=False,
+        )
+        if r.status_code == 404:
+            return "skipped_already_deleted"
+        r.raise_for_status()
+        source_url = r.json().get("source_url") or ""
+        path_part = source_url.split("/wp-content/uploads/")[-1]
+        stem, _, ext = path_part.rpartition(".")
+        filename_stem = stem.rsplit("/", 1)[-1]
+        if not re.fullmatch(rf"{re.escape(note_key)}-thumb(?:-\d+)?(?:-scaled)?", filename_stem):
+            return "skipped_not_sync_thumbnail"
+
+        ref_pattern = re.compile(rf"{re.escape(stem)}(?:-\d+x\d+)?\.{re.escape(ext)}")
+        for post_type in ("posts", "pages"):
+            page_no = 1
+            while True:
+                r = self._request(
+                    "GET", f"{self.site_url}/wp-json/wp/v2/{post_type}",
+                    params={"search": filename_stem, "status": "any", "context": "edit",
+                            "per_page": 100, "page": page_no, "orderby": "id", "order": "asc"},
+                    raise_for_status=False,
+                )
+                if r.status_code == 400:  # 最終ページを超えた
+                    break
+                r.raise_for_status()
+                items = r.json()
+                for item in items:
+                    if ref_pattern.search((item.get("content") or {}).get("raw", "") or ""):
+                        return f"skipped_referenced_by_{post_type}_{item['id']}"
+                if page_no >= int(r.headers.get("X-WP-TotalPages", 1) or 1):
+                    break
+                page_no += 1
+
+        self._request(
+            "DELETE", f"{self.site_url}/wp-json/wp/v2/media/{old_media_id}",
+            params={"force": "true"},
+        )
+        return "deleted"
+
     def _post_media(self, image_bytes: bytes, content_type: str, filename: str) -> int | None:
         try:
             r = self._request(
@@ -1492,6 +1547,27 @@ def sync_note_updates(
                         note_state[key]["thumbnail_url"] = thumbnail_url
                     print(f"    [OK] post_id={post['id']} を更新しました")
                     log_rows.append(log_row("update_note", post["id"], slug, a["title"], "success"))
+
+                    # 新しいアイキャッチの紐付けが成功した後に限り、差し替え前の旧画像を削除する
+                    # （安全条件は WP.delete_replaced_featured_media を参照）。失敗しても同期は止めない。
+                    if "featured_media" in update_payload:
+                        old_media_id = post.get("featured_media") or 0
+                        try:
+                            del_result = wp.delete_replaced_featured_media(
+                                old_media_id, update_payload["featured_media"], key,
+                            )
+                        except Exception as e:
+                            del_result = f"error: {e}"
+                        if del_result == "deleted":
+                            print(f"    [アイキャッチ] 差し替え前の旧画像を削除しました（media_id={old_media_id}）")
+                        elif old_media_id:
+                            print(f"    [アイキャッチ] 旧画像（media_id={old_media_id}）は削除しませんでした: {del_result}")
+                        if old_media_id:
+                            log_rows.append(log_row(
+                                "update_note", post["id"], slug, a["title"],
+                                "old_thumbnail_deleted" if del_result == "deleted" else "old_thumbnail_kept",
+                                f"media_id={old_media_id} {del_result}",
+                            ))
 
                     entry_code = (post.get("meta") or {}).get("codoc_entry_code")
                     if not entry_code:
