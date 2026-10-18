@@ -134,10 +134,16 @@ def run_list_file_mode(wp, state: dict, creds: dict, list_path: Path, execute: b
     for key in keys:
         if key in articles_by_key:
             targets.append(articles_by_key[key])
+            continue
+        # 一覧APIに出ない公開記事（note側で「クリエイターページに表示しない」設定）は
+        # 単体記事APIから直接取得する
+        article = core.fetch_note_article_by_key(key)
+        if article:
+            print(f"  [情報] {key} は公開一覧に無いため、記事URLから直接取得しました")
+            targets.append(article)
         else:
-            # 公開一覧APIに無い記事（下書き・削除済み・別アカウントの記事・URLの誤記）は
-            # 本文も価格情報も取れないため同期できない
-            print(f"  [警告] {key} はnote.comの公開済み記事一覧に見つからないためスキップします")
+            # 下書き・削除済み・別アカウントの記事・URLの誤記は本文も価格情報も取れないため同期できない
+            print(f"  [警告] {key} はnote.comの公開済み記事に見つからないためスキップします")
             log_rows.append(core.log_row("list_sync", None, key, "", "not_found_on_note"))
 
     # 先にWP側の存在有無で振り分ける。sync_new_note_posts で作成した直後の記事を

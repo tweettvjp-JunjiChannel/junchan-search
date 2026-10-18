@@ -707,6 +707,54 @@ def fetch_note_article_list() -> list[dict]:
     return articles
 
 
+NOTE_SINGLE_API_URL = "https://note.com/api/v3/notes/{key}"
+
+
+def fetch_note_article_by_key(key: str) -> dict | None:
+    """記事キーを指定してnote.com公開APIから1件分のメタデータを直接取得する（ログイン不要）。
+
+    2026-10-18追記：note側で「クリエイターページに表示しない」設定
+    （exclude_from_creator_top）にした公開記事は、fetch_note_article_list が使う
+    一覧API（creators/{user}/contents）に一切出てこないため、--list-file で
+    URLを指定しても同期できなかった（実機で2件の同期漏れを確認）。
+    単体記事API（v3/notes/{key}）なら非表示設定の記事も取得できるので、
+    一覧で見つからない記事のフォールバックとして使う。返す辞書は
+    fetch_note_article_list の各要素と同じ形式。
+    公開済みでない記事・別アカウントの記事・存在しないキーは None を返す。
+    """
+    resp = requests.get(
+        NOTE_SINGLE_API_URL.format(key=key),
+        headers={"User-Agent": "Mozilla/5.0"}, timeout=20,
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    c = resp.json().get("data") or {}
+    if (
+        c.get("key") != key
+        or c.get("status") != "published"
+        or (c.get("user") or {}).get("urlname") != NOTE_USERNAME
+    ):
+        return None
+    price = c.get("price") or 0
+    return {
+        "key": key,
+        "title": c.get("name") or "",
+        "price": price,
+        "publish_at": c.get("publish_at") or "",
+        "thumbnail": c.get("eyecatch") or "",
+        "tags": list(dict.fromkeys(
+            normalize_note_tag_name(h["hashtag"]["name"])
+            for h in (c.get("hashtag_notes") or []) if h.get("hashtag")
+            and normalize_note_tag_name(h["hashtag"]["name"])
+        )),
+        "paywall_element_id": c.get("separator"),
+        "is_free": price == 0,
+        "like_count": c.get("like_count", 0),
+        "url": f"https://note.com/{NOTE_USERNAME}/n/{key}",
+    }
+
+
 def get_note_browser_page(pw, headless: bool):
     """note.com専用の保存済みログインセッション（chrome_user_data）でブラウザを開く。"""
     context = pw.chromium.launch_persistent_context(
