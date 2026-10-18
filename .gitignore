@@ -33,3 +33,6 @@ chrome_user_data/
 # WordPress REST API用の認証情報（アプリケーションパスワード等の機密情報を含む）
 wp_credentials.json
 codoc_tag_mapping.csv
+
+# 放送後ツイート作成.bat の出力（毎回生成される下書き）
+tweet_drafts/
