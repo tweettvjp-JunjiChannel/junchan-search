@@ -1,11 +1,11 @@
 @echo off
-REM note過去記事の差分自動検知・更新バッチ（直近90日以内のみが対象、軽量版）。
-REM ダブルクリックで本番実行する（note.com側の加筆修正・動画差し替え等を
-REM 自動検知し、差分がある記事だけWordPress側を上書き更新する）。
-REM 数十件程度が対象のため数分で完了する。
-REM 全記事（約360件）をチェックしたい場合は「全件差分同期.bat」を使うこと
-REM （sync_updated_notes.pyのデフォルトは全件対象のため、こちらは
-REM  --recent-days 90 を明示的に指定して軽量モードに固定している）。
+REM note�ߋ��L���̍����������m�E�X�V�o�b�`�i����90���ȓ��݂̂��ΏہA�y�ʔŁj�B
+REM �_�u���N���b�N�Ŗ{�Ԏ��s����inote.com���̉��M�C���E���捷���ւ�����
+REM �������m���A����������L������WordPress�����㏑���X�V����j�B
+REM ���\�����x���Ώۂ̂��ߐ����Ŋ�������B
+REM �S�L���i��360���j���`�F�b�N�������ꍇ�́u�S����������.bat�v���g������
+REM �isync_updated_notes.py�̃f�t�H���g�͑S���Ώۂ̂��߁A�������
+REM  --recent-days 90 �𖾎��I�Ɏw�肵�Čy�ʃ��[�h�ɌŒ肵�Ă���j�B
 
 cd /d "%~dp0"
 python sync_updated_notes.py --execute --recent-days 90
