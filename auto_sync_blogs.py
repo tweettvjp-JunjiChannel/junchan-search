@@ -464,6 +464,27 @@ def build_note_sync_meta(article: dict, full_title: str) -> dict:
     }
 
 
+def archive_discount_price(price: int, publish_at: str, now: datetime | None = None) -> int:
+    """note公開から CODOC_DISCOUNT_AFTER_DAYS 日以上たった有料記事の、当サイトでの販売価格を返す。
+
+    2026-10-19追記：「note発行から3ヶ月（90日）経過した有料記事は一律100円」は
+    当サイトの売り文句だが、従来は月次メンテの sync_codoc_discount が後から
+    値下げするだけで、90日を過ぎた過去記事を新規登録すると次の月次メンテまで
+    note定価（300円等）のまま販売されていた（実機で2件発生）。
+    新規投稿・更新追従の時点でこの関数を通し、最初から正しい価格で登録する。
+    判定は sync_codoc_discount と同じ「日付の時刻部分まで比較・ローカル時刻」に揃えてある。
+    無料記事・元から100円以下の記事・90日未満の記事は price をそのまま返す。
+    """
+    if not price or price <= CODOC_DISCOUNT_PRICE or not publish_at:
+        return price
+    try:
+        published = datetime.strptime(publish_at[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return price
+    cutoff = (now or datetime.now()) - timedelta(days=CODOC_DISCOUNT_AFTER_DAYS)
+    return CODOC_DISCOUNT_PRICE if published <= cutoff else price
+
+
 def make_codoc_block(price: int) -> str:
     attrs = dict(CODOC_BLOCK_ATTRS_TEMPLATE)
     attrs["price"] = int(price)
@@ -1149,9 +1170,13 @@ def sync_new_note_posts(
                     title = truncate_title_for_codoc(a["title"] or "無題")
 
                     content = body_html
+                    # 公開から90日以上たった過去記事は、note定価ではなく値下げ後の価格で登録する
+                    sale_price = archive_discount_price(a["price"], a["publish_at"])
                     if a["price"] and not a["is_free"]:
-                        with_marker = insert_codoc_paywall_at_element(content, a.get("paywall_element_id"), a["price"])
-                        content = with_marker if with_marker is not None else insert_codoc_paywall_simple(content, a["price"])
+                        with_marker = insert_codoc_paywall_at_element(content, a.get("paywall_element_id"), sale_price)
+                        content = with_marker if with_marker is not None else insert_codoc_paywall_simple(content, sale_price)
+                        if sale_price != a["price"]:
+                            print(f"    [値下げ] 公開から{CODOC_DISCOUNT_AFTER_DAYS}日以上経過のため {a['price']}円 -> {sale_price}円で登録します")
 
                     # 記事冒頭に「単品購入 or 月額サブスク」の案内枠（サブスク登録ボタン込み）を付与する。
                     # generate_perfect_wp_xml.py での過去の一括移行と同じ形式・位置（本文の最上部）。
@@ -1168,12 +1193,20 @@ def sync_new_note_posts(
 
                     full_title = a["title"] or title
 
+                    meta = build_note_sync_meta(a, full_title)
+                    if a["price"] and not a["is_free"] and sale_price != a["price"]:
+                        # 値下げ済みの価格表示と、アーカイブ割引ボックス（note-style-engagement.php の
+                        # prepend_archive_discount_box。「note定価◯円から」を表示）の元価格を、
+                        # sync_codoc_discount で値下げした記事と同じ形で設定する
+                        meta["codoc_cached_price"] = sale_price
+                        meta["codoc_price_before_discount"] = a["price"]
+
                     payload = {
                         "title": title,
                         "slug": slug,
                         "content": content,
                         "excerpt": full_title,
-                        "meta": build_note_sync_meta(a, full_title),
+                        "meta": meta,
                         "status": "publish",
                         "date": a["publish_at"][:19] if a["publish_at"] else None,
                         # 「note」カテゴリー（固定ID）を必ず割り当てる。サイドバーの
@@ -1256,7 +1289,7 @@ def sync_new_note_posts(
                             thumbnail_url = a["thumbnail"]
 
                     new_hash = body_hash(body_html)
-                    state.setdefault("note", {})[a["key"]] = {"body_hash": new_hash, "price": a["price"]}
+                    state.setdefault("note", {})[a["key"]] = {"body_hash": new_hash, "price": sale_price}
                     if thumbnail_url:
                         # 更新追従（sync_note_updates）でアイキャッチ差し替えの要否を判定する基準値
                         state["note"][a["key"]]["thumbnail_url"] = thumbnail_url
@@ -1530,6 +1563,13 @@ def sync_note_updates(
                     # 既存記事のCodoc価格は変更せず維持したまま本文だけ差し替える
                     existing_content = post.get("content", {}).get("raw", "") or ""
                     existing_price = extract_codoc_price(existing_content)
+                    # 既存価格がまだ値下げ前で、公開から90日以上たっていれば、
+                    # 月次メンテを待たずにこの更新で100円へ下げる
+                    price_before_discount = None
+                    discounted = archive_discount_price(existing_price or 0, a["publish_at"])
+                    if existing_price and discounted != existing_price:
+                        print(f"    [値下げ] 公開から{CODOC_DISCOUNT_AFTER_DAYS}日以上経過のため {existing_price}円 -> {discounted}円に変更します")
+                        price_before_discount, existing_price = existing_price, discounted
 
                     content = body_html
                     if existing_price and existing_price > 0:
@@ -1562,6 +1602,8 @@ def sync_note_updates(
                             "nseb_like_count": int(a.get("like_count") or 0),
                         },
                     }
+                    if price_before_discount:
+                        update_payload["meta"]["codoc_price_before_discount"] = price_before_discount
                     existing_categories = post.get("categories") or []
                     if NOTE_CATEGORY_ID not in existing_categories:
                         update_payload["categories"] = sorted(set(existing_categories) | {NOTE_CATEGORY_ID} - {1})

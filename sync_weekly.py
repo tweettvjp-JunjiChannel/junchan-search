@@ -1,6 +1,7 @@
 """
 週次運用スクリプト：note.comの新着記事のみをWordPressへ取り込み、
 Codocの月額購読プラン（4133番、月額1,000円）へ自動紐付けする。
+あわせて、公開から90日を過ぎた有料記事を100円へ値下げする。
 
 やること（それ以上は何もしない）:
     1. note.com側の公開記事一覧を取得し、WordPress側にまだ存在しない
@@ -9,9 +10,15 @@ Codocの月額購読プラン（4133番、月額1,000円）へ自動紐付けす
        自動でONにする（sync_new_note_posts内で新規投稿のたびに実行される他、
        本スクリプトの最後にも横断的な安全網としてもう一度確認する）。
 
-既存記事の本文更新チェックや90日値下げチェックは対象外（月次メンテナンス
-=sync_monthly_maintenance.py の担当）。週次はあくまで「新着の取りこぼしがないか」
-を軽く回すためのスクリプトとして、処理範囲をあえて絞ってある。
+    3. 公開から90日を過ぎた有料記事の価格を100円へ下げる（auto_sync_blogs.sync_codoc_discount）。
+       2026-10-19追記：従来は月次メンテナンスだけの担当だったため、90日を迎えた記事が
+       次の月次メンテまで最大1ヶ月ほどnote定価（300円等）のまま販売されていた
+       （実機で6件確認）。noteカテゴリーの一覧（日付のみ）と90日経過記事の本文を
+       100件ずつまとめて取得するだけなので、30秒程度で終わる。
+
+既存記事の本文更新チェックは対象外（月次メンテナンス=sync_monthly_maintenance.py の担当）。
+週次はあくまで「新着の取りこぼしがないか」を軽く回すためのスクリプトとして、
+処理範囲をあえて絞ってある。
 
 実行方法:
     python sync_weekly.py                  # ドライラン（何も変更しない。まず必ずこれで確認）
@@ -32,7 +39,7 @@ import auto_sync_blogs as core
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="週次運用: note新着記事の取り込み + Codoc購読プラン紐付け")
+    parser = argparse.ArgumentParser(description="週次運用: note新着記事の取り込み + Codoc購読プラン紐付け + 90日経過記事の値下げ")
     parser.add_argument("--execute", action="store_true", help="実際に変更を行う（指定しない場合はドライラン）")
     parser.add_argument("--limit", type=int, default=None, help="対象件数の上限（試験実行用）")
     args = parser.parse_args()
@@ -54,6 +61,8 @@ def main() -> None:
 
     log_rows = core.sync_new_note_posts(wp, note_articles, state, args.execute, args.limit, link_maps)
     core.save_state(state)
+
+    log_rows += core.sync_codoc_discount(wp, args.execute, args.limit)
 
     core.relink_touched_posts(wp, log_rows, args.execute)
 
