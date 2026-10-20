@@ -24,6 +24,7 @@ ntfy経由の「確認が取れるまで再通知し続ける」緊急アラー�
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -45,18 +46,31 @@ try:
 except ImportError:
     _MSVCRT_AVAILABLE = False
 
-# ntfyのトピック名はGitHubに公開しないよう、Git管理外のファイル（.gitignore登録済み）から読む
-NTFY_TOPIC_FILE = Path(__file__).resolve().parent / "ntfy_topic.txt"
+# ntfyのトピック名はGitHubに公開しないよう、Git管理外の .env（.gitignore登録済み）から読む
+ENV_FILE = Path(__file__).resolve().parent / ".env"
 
 
-def load_ntfy_topic() -> str:
-    """ntfy_topic.txt の1行目（トピック名）を返す。無ければ分かりやすいエラーで止める"""
+def load_env_value(key: str) -> str:
+    """環境変数 → .env の順に key の値を返す（標準ライブラリだけで読むため dotenv は使わない）"""
+    value = os.environ.get(key, "").strip()
+    if value:
+        return value
     try:
-        topic = NTFY_TOPIC_FILE.read_text(encoding="utf-8").strip().splitlines()[0].strip()
-    except (OSError, IndexError):
-        topic = ""
+        lines = ENV_FILE.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        name, sep, val = line.partition("=")
+        if sep and name.strip() == key:
+            return val.strip().strip("'\"")
+    return ""
+
+
+def load_ntfy_topic(key: str = "NTFY_TOPIC") -> str:
+    """.env の NTFY_TOPIC / NTFY_ACK_TOPIC を返す。無ければ分かりやすいエラーで止める"""
+    topic = load_env_value(key)
     if not topic:
-        raise SystemExit(f"[エラー] ntfyのトピック名が読めません。{NTFY_TOPIC_FILE} の1行目にトピック名を書いてください。")
+        raise SystemExit(f"[エラー] ntfyのトピック名が読めません。{ENV_FILE} に {key}=トピック名 を書いてください。")
     return topic
 
 
@@ -68,9 +82,9 @@ class JunchanAgent:
         interval_seconds: int = 60,
         base_url: str = "https://ntfy.sh",
     ):
-        # 省略時は ntfy_topic.txt のトピック名、ACK受付はその末尾に「-ack」を付けたもの
-        self.alert_topic = alert_topic or load_ntfy_topic()
-        self.ack_topic = ack_topic or f"{self.alert_topic}-ack"
+        # 省略時は .env の NTFY_TOPIC（アラーム・完了通知）と NTFY_ACK_TOPIC（ACK受付）
+        self.alert_topic = alert_topic or load_ntfy_topic("NTFY_TOPIC")
+        self.ack_topic = ack_topic or load_ntfy_topic("NTFY_ACK_TOPIC")
         self.interval_seconds = interval_seconds
         self.base_url = base_url.rstrip("/")
 
