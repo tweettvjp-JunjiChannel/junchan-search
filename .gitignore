@@ -30,6 +30,12 @@ public_html/
 # note_downloader.py 専用Chromeプロファイル（ログインセッションを含むため機密）
 chrome_user_data/
 
+# APIキー等の環境変数（OpenRouter等の機密情報を含むため絶対にコミットしない）
+.env
+
+# ntfyの通知先トピック名（知っている人は誰でも通知の送信・閲覧ができるため公開しない）
+ntfy_topic.txt
+
 # WordPress REST API用の認証情報（アプリケーションパスワード等の機密情報を含む）
 wp_credentials.json
 codoc_tag_mapping.csv

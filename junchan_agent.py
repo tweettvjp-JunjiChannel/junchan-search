@@ -28,6 +28,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -44,17 +45,32 @@ try:
 except ImportError:
     _MSVCRT_AVAILABLE = False
 
+# ntfyのトピック名はGitHubに公開しないよう、Git管理外のファイル（.gitignore登録済み）から読む
+NTFY_TOPIC_FILE = Path(__file__).resolve().parent / "ntfy_topic.txt"
+
+
+def load_ntfy_topic() -> str:
+    """ntfy_topic.txt の1行目（トピック名）を返す。無ければ分かりやすいエラーで止める"""
+    try:
+        topic = NTFY_TOPIC_FILE.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+    except (OSError, IndexError):
+        topic = ""
+    if not topic:
+        raise SystemExit(f"[エラー] ntfyのトピック名が読めません。{NTFY_TOPIC_FILE} の1行目にトピック名を書いてください。")
+    return topic
+
 
 class JunchanAgent:
     def __init__(
         self,
-        alert_topic: str = "junchan2026",
-        ack_topic: str = "junchan2026-ack",
+        alert_topic: str | None = None,
+        ack_topic: str | None = None,
         interval_seconds: int = 60,
         base_url: str = "https://ntfy.sh",
     ):
-        self.alert_topic = alert_topic
-        self.ack_topic = ack_topic
+        # 省略時は ntfy_topic.txt のトピック名、ACK受付はその末尾に「-ack」を付けたもの
+        self.alert_topic = alert_topic or load_ntfy_topic()
+        self.ack_topic = ack_topic or f"{self.alert_topic}-ack"
         self.interval_seconds = interval_seconds
         self.base_url = base_url.rstrip("/")
 
