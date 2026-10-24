@@ -1,0 +1,52 @@
+# ============================================================
+# wp-content/uploads/.htaccess 用：アップロードフォルダでのPHP実行を禁止する
+# 設置先：public_html/junchan-world.com/wp-content/uploads/.htaccess
+# （ファイル名を「.htaccess」に変えてアップロードする）
+# 作成：2026-10-24 Claude Code（セキュリティ監査）
+# ============================================================
+
+# --- 1. PHP系の拡張子へのアクセスをすべて拒否（Apache 2.4 / 2.2 両対応） ---
+<FilesMatch "(?i)\.(php[0-9]?|phtml|phar|pht|phps|cgi|pl|py|sh|asp|aspx|jsp)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# --- 2. 「image.php.jpg」のような二重拡張子の偽装ファイルも拒否 ---
+<FilesMatch "(?i)\.(php[0-9]?|phtml|phar)\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# --- 3. 万一アクセスが通っても、PHPとして解釈させない ---
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php7.c>
+    php_flag engine off
+</IfModule>
+RemoveHandler .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
+RemoveType .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
+
+# --- 4. フォルダの中身一覧表示を禁止（現在も403だが念のため） ---
+Options -Indexes
+
+# --- 5. .htaccess 自体や隠しファイルを読ませない ---
+<FilesMatch "^\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

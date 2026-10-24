@@ -39,3 +39,19 @@ codoc_tag_mapping.csv
 
 # 放送後ツイート作成.bat の出力（毎回生成される下書き）
 tweet_drafts/
+
+# ===== 2026-10-24 セキュリティ監査で追加 =====
+# Streamlit のシークレット（サブフォルダ内も含めて除外。media_search/ 側が追跡されていたため）
+**/.streamlit/secrets.toml
+# テスト用アカウント（メールアドレス・パスワード入り）
+test_account.json
+# 認証情報・鍵ファイル全般（.template は除外しない）
+*credentials*.json
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+# wp-admin / Codoc 管理画面のHTMLダンプ（nonce等のセッション情報を含みうる）
+wp_admin_inspect_output/
+codoc_inspect_output/
