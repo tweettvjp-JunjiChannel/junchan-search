@@ -1,3 +1,4 @@
 # 個別変更リスト.bat で強制同期するnote記事のURLを1行に1つ記入してください。
 # 例: https://note.com/tweettv/n/nXXXXXXXXXXXX
 # 「#」で始まる行と空行は無視されます。
+https://note.com/tweettv/n/ne75b4ae931da

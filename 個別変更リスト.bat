@@ -23,9 +23,23 @@ if not exist "update_notelist.txt" (
 REM Pythonの出力はUTF-8のため、文字化け（「□グイン」等）を防ぐようコンソールをUTF-8に切り替える
 chcp 65001 > nul
 python sync_updated_notes.py --execute --list-file update_notelist.txt
+set SYNCERR=%errorlevel%
+
+rem [2026-10-20] Obsidian: re-fetch the listed note articles and rebuild their notes, then add new articles.
+rem Summaries are reused when a topic is unchanged; changed topics and titles are re-summarized by DeepSeek.
+echo.
+echo [Obsidian] note -^> Obsidian (listed articles are rebuilt, new articles are added)
+pushd F:\ArchiveProject
+python scripts\note_to_obsidian.py --refresh-list "%~dp0update_notelist.txt"
+if not errorlevel 1 python scripts\ai_enrich_note.py --workers 16
+if errorlevel 1 echo [Obsidian] ERROR - run F:\ArchiveProject\note*.bat again later to resume.
+echo [Obsidian] ExciteBlog -^> Obsidian (new articles only)
+python scripts\exblog_to_obsidian.py
+if errorlevel 1 echo [Obsidian] ERROR - ExciteBlog import failed. Run it again later to resume.
+popd
 
 echo.
-if errorlevel 1 (
+if not "%SYNCERR%"=="0" (
     powershell -NoProfile -Command "[Console]::Beep(400,800)"
 ) else (
     powershell -NoProfile -Command "1..3 | ForEach-Object { [Console]::Beep(1000,300); Start-Sleep -Milliseconds 200 }"
